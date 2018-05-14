@@ -1,0 +1,499 @@
+---
+title: "R Notebook"
+output: html_notebook
+---
+
+### The project
+
+We will build and implement a trend trading strategy based on the moving average price of the SP500. This is a simple strategy that we will use to explore R code.
+
+A simple moving average is calculated by adding all the data for a number of periods and dividing the total by the number of periods. An exponential moving average assigns greater weight to recent time periods. 
+
+We will be examining a trading strategy that buys when the SP500 50-day SMA is above the 200-day SMA (a 'golden cross') and sells when the 50-day SMA moves below the 200-day SMA (a 'death cross').  
+
+### Load the packages
+
+```{r setup}
+knitr::opts_chunk$set(message = FALSE, warning = FALSE)
+library(tidyverse)
+library(tidyquant)
+library(timetk)
+library(tibbletime)
+library(highcharter)
+```
+
+### Import data
+We will be working with SP500 and treasury bills data so that when we exit the SP500 we can invest in treasuries and get some yield.
+
+Let's explore two ways to get this date. 
+
+First, it is publicly available. We can use the `tidyquant` package and it's `tq_get()` function to grab the data from yahoo! finance. 
+
+```{r}
+
+symbols <- c("^GSPC", "^IRX")
+
+
+prices <- 
+  tq_get(symbols, 
+         get = "stock.prices",
+         from = "1980-01-01")
+
+library(writexl)
+# Write the first data set in a new workbook
+write_xlsx(prices, "prices.xlsx")
+write_csv(prices, "prices.csv", append = FALSE)
+```
+
+
+That works well but in industry it's likely you wouldn't be accessing the yahoo! for your price data. Let's see how to import this data from an Excel file or a csv file. 
+
+```{r}
+prices_excel <-  
+ read_excel("prices.xlsx") %>% 
+  mutate(date = ymd(date))
+```
+
+```{r}
+prices_csv <- 
+ read_csv("prices.csv")  %>% 
+  mutate(date = ymd(date))
+```
+
+
+### Explore the raw data
+
+Start with the simple line chart. This is the SP500, so we probably won't find much of interest here, but if this were alternative data who knows. 
+
+We will use the `ggplot2` package for this.`ggplot2` is R's most popular data visualization package and we will explore its grammar and layering logic. For now, a line chart.
+
+```{r}
+prices %>% 
+  dplyr::filter(symbol == "^GSPC") %>% 
+  select(date, adjusted) %>% 
+  ggplot(aes(x = date, y = adjusted)) +
+  geom_line(color = "cornflowerblue")
+```
+
+Let's add daily returns and better column names.
+
+```{r}
+prices %>% 
+  select(symbol, date, adjusted) %>% 
+  spread(symbol, adjusted) %>%
+  rename(spy = `^GSPC`, treas = `^IRX`) %>% 
+  mutate(spy_returns = log(spy) - log(lag(spy))) %>% 
+  tail(6)
+```
+
+
+```{r, warning = FALSE}
+prices %>% 
+  select(symbol, date, adjusted) %>% 
+  spread(symbol, adjusted) %>%
+  rename(spy = `^GSPC`, treas = `^IRX`) %>% 
+  mutate(spy_returns = log(spy) - log(lag(spy))) %>% 
+  ggplot(aes(x = date, y = spy_returns)) +
+  geom_point(color = "cornflowerblue") +
+  scale_x_date(breaks = scales::pretty_breaks(n = 30)) +
+  ylab("SP500 daily returns") +
+  theme(axis.text.x = element_text(angle = 90))
+```
+
+It's a blunt instrument but look at late 1987, 2000-2002 and late 2008 to 2009.
+
+Let's look at how these returns are distributed. 
+
+```{r}
+prices %>% 
+  select(symbol, date, adjusted) %>% 
+  spread(symbol, adjusted) %>%
+  rename(spy = `^GSPC`, treas = `^IRX`) %>% 
+  mutate(spy_returns = log(spy) - log(lag(spy))) %>% 
+  ggplot(aes(x = spy_returns)) +
+  geom_histogram(color = "cornflowerblue", binwidth = .003, fill = "pink") +
+  # scale_x_date(breaks = scales::pretty_breaks(n = 30)) +
+  ylab("SP500 daily returns") +
+  theme(axis.text.x = element_text(angle = 90))
+```
+
+Eyeball test indicates a longer, negative tail. 
+
+`ggplot()` works in layers. We can add a density layer. 
+
+```{r}
+prices %>% 
+  select(symbol, date, adjusted) %>% 
+  spread(symbol, adjusted) %>%
+  rename(spy = `^GSPC`, treas = `^IRX`) %>% 
+  mutate(spy_returns = log(spy) - log(lag(spy))) %>% 
+  ggplot(aes(x = spy_returns)) +
+  geom_histogram(color = "cornflowerblue", binwidth = .003, fill = "pink") +
+  stat_density(geom = "line", color = "green") +
+  ylab("SP500 daily returns") +
+  theme(axis.text.x = element_text(angle = 90))
+```
+
+Let's investigate the tail statistics a little bit.
+
+```{r}
+prices %>% 
+  select(symbol, date, adjusted) %>% 
+  spread(symbol, adjusted) %>%
+  rename(spy = `^GSPC`, treas = `^IRX`) %>% 
+  mutate(spy_returns = log(spy) - log(lag(spy))) %>%
+  na.omit() %>% 
+  summarise(skewness = skewness(spy_returns),
+            kurtosis = kurtosis(spy_returns))
+```
+
+Negative skew and excess kurtosis; our returns are not exactly normally distributed. 
+
+We have a feel for our data, let's start to add our logic and transform this data. 
+
+First, we need a way to calculate the rolling 50 and 200-day moving averages. We use `rollify()` to create functions for this.
+
+
+```{r}
+
+roll_mean_50 <- 
+  rollify(mean, window = 50)
+
+roll_mean_200 <- 
+  rollify(mean, window = 200)
+```
+
+Now we use `mutate()` to add the moving averages to the data.
+
+```{r}
+
+prices %>% 
+  select(symbol, date, adjusted) %>% 
+  spread(symbol, adjusted) %>%
+  rename(spy = `^GSPC`, treas = `^IRX`) %>% 
+  mutate(sma_200 = roll_mean_200(spy),
+         sma_50 = roll_mean_50(spy)) %>% 
+  na.omit()
+```
+
+Let's visualize our new trends, compared to raw price. 
+
+```{r}
+
+prices %>% 
+  select(symbol, date, adjusted) %>% 
+  spread(symbol, adjusted) %>%
+  rename(spy = `^GSPC`, treas = `^IRX`) %>% 
+  mutate(sma_200 = roll_mean_200(spy),
+         sma_50 = roll_mean_50(spy)) %>% 
+  na.omit() %>% 
+  select(-treas) %>% # -spy to see just the trends
+  dplyr::filter(date > "2015-01-01") %>% # try different date bands, post 2017, 2018
+  gather(series, value, -date)  %>% 
+  ggplot(aes(x = date, y = value, color = series)) +
+  geom_line()
+```
+
+Let's get algorithmic.
+
+*If* the 50-day MA is above the 200-day MA, buy the market, *else* go to the risk free return, or can put to zero if we prefer.
+
+What we need: 
+1) rolling 50-day SMA
+2) rolling 200-day SMA
+3) if_else logic to create a buy or sell signal
+
+```{r}
+prices %>% 
+  select(symbol, date, adjusted) %>% 
+  spread(symbol, adjusted) %>%
+  rename(spy = `^GSPC`, treas = `^IRX`) %>% 
+  mutate(sma_200 = roll_mean_200(spy),
+         sma_50 = roll_mean_50(spy)) %>% 
+  na.omit() %>% 
+  mutate(signal = if_else(sma_50 > sma_200, 1, 0),  
+         spy_returns = round(log(spy) - log(lag(spy)), 4))  %>% 
+  dplyr::filter(date > "1987-10-01" & date < "1988-01-01")
+```
+
+
+Let's add the logic: if the signal is 1, buy the SP500, which we will code as signal * SP500 returns (the next day), else go to risk free.
+
+```{r}
+
+prices %>% 
+  select(symbol, date, adjusted) %>% 
+  spread(symbol, adjusted) %>%
+  rename(spy = `^GSPC`, treas = `^IRX`) %>% 
+  mutate(sma_200 = roll_mean_200(spy),
+         sma_50 = roll_mean_50(spy),
+         signal = if_else(sma_50 > sma_200, 1, 0),
+         spy_returns = log(spy) - log(lag(spy)), 
+         daily_treas = (1 + (treas/100)) ^ (1/252) - 1,
+         trend_returns = if_else(lag(signal) == 1, (signal * spy_returns), daily_treas))
+```
+
+We now have a column for our strategy. Let's add a buy and hold strategy where we buy the SP500 90% and treasury rate 10% and hold it for the duration. 
+
+```{r}
+
+prices %>% 
+  select(symbol, date, adjusted) %>% 
+  spread(symbol, adjusted) %>%
+  rename(spy = `^GSPC`, treas = `^IRX`) %>% 
+  mutate(sma_200 = roll_mean_200(spy),
+         sma_50 = roll_mean_50(spy)) %>% 
+  na.omit() %>% 
+  mutate(signal = if_else(sma_50 > sma_200, 1, 0),
+         spy_returns = log(spy) - log(lag(spy)),
+         daily_treas = (1 + (treas/100)) ^ (1/252) - 1,
+         buy_hold_returns = (.9 * spy_returns) + (.1 * daily_treas),
+         trend_returns = if_else(lag(signal) == 1, (signal * spy_returns), daily_treas)
+         ) %>%
+  na.omit()
+```
+
+We can add columns to see dollar growth for our two asset mixes as well. 
+
+```{r}
+sma_trend_results <- 
+prices %>% 
+  select(symbol, date, adjusted) %>% 
+  spread(symbol, adjusted) %>%
+  rename(spy = `^GSPC`, treas = `^IRX`) %>% 
+  mutate(sma_200 = roll_mean_200(spy),
+         sma_50 = roll_mean_50(spy),
+         signal = if_else(sma_50 > sma_200, 1, 0),
+         spy_returns = log(spy) - log(lag(spy)), 
+         daily_treas = (1 + (treas/100)) ^ (1/252) - 1,
+         buy_hold_returns = (.9 * spy_returns) + (.1 * daily_treas),
+         trend_returns = if_else(lag(signal) == 1, (signal * spy_returns), daily_treas)
+         ) %>%
+  na.omit() %>% 
+  mutate(
+         trend_growth = accumulate(1 + trend_returns, `*`),
+         buy_hold_growth = accumulate(1 + buy_hold_returns, `*`))
+
+sma_trend_results %>% tail()
+```
+
+### Visualize our trend strategy results
+
+```{r}
+sma_trend_results %>%
+  select(date, trend_growth, buy_hold_growth) %>% 
+  gather(strategy, growth, -date) %>% 
+  ggplot(aes(x = date, y = growth, color = strategy)) +
+  geom_line()
+
+```
+
+Our original trend has grown higher, but the z-score logic seems more stable.
+
+### Analyze with standard deviation, skewness, kurtosis, sharpe ratio
+
+
+```{r}
+rfr <- .00003
+
+sma_trend_results %>%
+  select(date, trend_returns, buy_hold_returns) %>% 
+  gather(strategy, returns, -date) %>% 
+  group_by(strategy) %>% 
+  summarise(stddev = sd(returns),
+            mean = mean(returns),
+            skewnsess = skewness(returns),
+            kurtosis = kurtosis(returns),
+            # Sharpe ratio with own equation
+            sharpe = mean(returns - rfr)/
+              sd(returns - rfr))
+```
+
+Our strategy has a higher sharpe, and lower standard deviation than buy hold. 
+We can plot those for a better sense. 
+
+```{r}
+
+sma_trend_results %>%
+  select(date, trend_returns, buy_hold_returns) %>% 
+  gather(strategy, returns, -date) %>% 
+  group_by(strategy) %>% 
+  summarise(stddev = sd(returns),
+            mean = mean(returns),
+            skewnsess = skewness(returns),
+            kurtosis = kurtosis(returns),
+            # Sharpe ratio with own equation
+            sharpe = mean(returns - rfr)/
+              sd(returns - rfr)) %>% 
+  ggplot(aes(x = stddev, y = sharpe, color = strategy)) +
+  geom_point(size = 3)
+```
+
+
+JKR Note: more visualizations here to show more ggplot functionality. 
+
+The above is a simple implementation, but is flexible. We can change assets, indicators.
+
+We can also add a signal, for example a zscore for when market is a number of standard deviations above or below a rolling average? 
+How would we implement that? 
+
+1) Calculate a spread
+2) turn it into a z-score
+3) create a signal
+
+```{r}
+prices %>% 
+  select(symbol, date, adjusted) %>% 
+  spread(symbol, adjusted) %>%
+  rename(spy = `^GSPC`, treas = `^IRX`) %>% 
+  mutate(sma_200 = roll_mean_200(spy),
+         sma_50 = roll_mean_50(spy)) %>% 
+  na.omit() %>% 
+  mutate(trend_signal = if_else(sma_50 > sma_200, 1, 0),
+         spy_returns = log(spy) - log(lag(spy)),
+         z_spread = (spy - sma_200),
+         z_score = (z_spread - mean(z_spread))/sd(z_spread),
+         z_signal = if_else(
+                            lag(z_score, 1) < -.05 & 
+                            lag(z_score, 2) < -.05 &
+                            lag(z_score, 3) < -.05,
+                            #lag(z_score, 4) < -.05 &
+                            #lag(z_score, 5) < -.05, 
+                            0, 1)) # %>% 
+  # dplyr::filter(date > "1987-10-01")
+  
+```
+
+Now we create a new strategy that depends on both the trend and the z-score.
+
+```{r}
+prices %>% 
+  select(symbol, date, adjusted) %>% 
+  spread(symbol, adjusted) %>%
+  rename(spy = `^GSPC`, treas = `^IRX`) %>% 
+  mutate(sma_200 = roll_mean_200(spy),
+         sma_50 = roll_mean_50(spy),
+         spy_returns = log(spy) - log(lag(spy))) %>% 
+  na.omit() %>% 
+  mutate(trend_signal = if_else(sma_50 > sma_200, 1, 0),
+         z_spread = (spy - sma_200),
+         z_score = (z_spread - mean(z_spread))/sd(z_spread),
+         z_signal = if_else(
+                            lag(z_score, 1) < -.05 & 
+                            lag(z_score, 2) < -.05 &
+                            lag(z_score, 3) < -.05,
+                            #lag(z_score, 4) < -.05 &
+                            #lag(z_score, 5) < -.05, 
+                            0, 1),
+         daily_treas = (1 + (treas/100)) ^ (1/252) - 1,
+         buy_hold_returns = (.9 * spy_returns) + (.1 * daily_treas),
+         trend_z_returns = if_else(lag(trend_signal) == 1 &
+                                 z_signal == 1, 
+                                 (trend_signal * spy_returns), daily_treas),
+         trend_returns =  if_else(lag(trend_signal) == 1,
+                                 (trend_signal * spy_returns), daily_treas)) # %>% 
+  # dplyr::filter(date > "1987-10-01")
+```
+
+Note the NAs - those will be a problem we convert to dollar growth for visualization.
+
+```{r}
+trend_z_results <- 
+prices %>% 
+  select(symbol, date, adjusted) %>% 
+  spread(symbol, adjusted) %>%
+  rename(spy = `^GSPC`, treas = `^IRX`) %>% 
+  mutate(sma_200 = roll_mean_200(spy),
+         sma_50 = roll_mean_50(spy),
+         spy_returns = log(spy) - log(lag(spy))) %>% 
+  na.omit() %>% 
+  mutate(trend_signal = if_else(sma_50 > sma_200, 1, 0),
+         z_spread = (spy - sma_200),
+         z_score = (z_spread - mean(z_spread))/sd(z_spread),
+         z_signal = if_else(
+                            lag(z_score, 1) < -.05 & 
+                            lag(z_score, 2) < -.05 &
+                            lag(z_score, 3) < -.05,
+                            #lag(z_score, 4) < -.05 &
+                            #lag(z_score, 5) < -.05, 
+                            0, 1),
+         daily_treas = (1 + (treas/100)) ^ (1/252) - 1,
+         trend_z_returns = if_else(lag(trend_signal) == 1 &
+                                 z_signal == 1, 
+                                 (trend_signal * spy_returns), daily_treas),
+         trend_returns =  if_else(lag(trend_signal) == 1,
+                                 (trend_signal * spy_returns), daily_treas),
+         buy_hold_returns = (.9 * spy_returns) + (.1 * daily_treas)) %>% 
+  #dplyr::filter(date > "1987-10-01") %>% 
+  select(date, trend_signal, z_signal, buy_hold_returns, trend_returns, trend_z_returns) %>%
+  na.omit() %>% 
+  mutate(
+         trend_growth = accumulate(1 + trend_returns, `*`),
+         trend_z_growth = accumulate(1 + trend_z_returns, `*`),
+         buy_hold_growth = accumulate(1 + buy_hold_returns, `*`))
+
+trend_z_results %>% tail()
+
+```
+
+### Visualize our trend + z strategy results
+
+```{r}
+trend_z_results %>%
+  select(date, trend_growth, trend_z_growth, buy_hold_growth) %>% 
+  gather(strategy, growth, -date) %>% 
+  ggplot(aes(x = date, y = growth, color = strategy)) +
+  geom_line()
+
+```
+
+Our original trend has grown higher, but the z-score logic seems more stable.
+
+### Analyze with standard deviation, skewness, kurtosis, sharpe ratio
+
+
+```{r}
+rfr <- .00003
+
+trend_z_results %>%
+  select(date, trend_returns, trend_z_returns, buy_hold_returns) %>% 
+  gather(strategy, returns, -date) %>% 
+  group_by(strategy) %>% 
+  summarise(stddev = sd(returns),
+            mean = mean(returns),
+            skewnsess = skewness(returns),
+            kurtosis = kurtosis(returns),
+            # Sharpe ratio with own equation
+            sharpe = mean(returns - rfr)/
+              sd(returns - rfr))
+```
+
+Our strategies have higher sharpe, and lower standard deviation than buy hold. 
+We can plot those for a better sense. 
+
+```{r}
+
+trend_z_results %>%
+  select(date, trend_returns, trend_z_returns, buy_hold_returns) %>% 
+  gather(strategy, returns, -date) %>% 
+  group_by(strategy) %>% 
+  summarise(stddev = sd(returns),
+            mean = mean(returns),
+            skewnsess = skewness(returns),
+            kurtosis = kurtosis(returns),
+            # Sharpe ratio with own equation
+            sharpe = mean(returns - rfr)/
+              sd(returns - rfr)) %>% 
+  ggplot(aes(x = stddev, y = sharpe, color = strategy)) +
+  geom_point(size = 3)
+```
+
+
+### To Shiny so can tweak parameters or RMD for a report
+Port this work to Shiny so end user can choose different assets, different moving averages, different z-score levels.
+
+ 
+
+
+
+

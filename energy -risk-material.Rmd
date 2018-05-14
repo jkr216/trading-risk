@@ -1,0 +1,457 @@
+---
+title: "Risk/Quant Training"
+author: "nima"
+date: "4/30/2018"
+output: html_notebook
+---
+
+```{r eval = FALSE, include=FALSE}
+knitr::opts_chunk$set(echo = TRUE, messaage = FALSE, warning = FALSE)
+install.packages("tidyverse")
+install.packages("rjson")
+install.packages("anomalize")
+install.packages("dygraphs")
+install.packages("timetk")
+install.packages("tibbletime")
+install.packages("RJSONIO")
+install.packages("ROCR")
+install.packages("fOptions")
+install.packages("fExoticOptions")
+install.packages("corrplot")
+install.packages("corrr")
+```
+
+```{r}
+library(tidyverse)
+library(rjson)
+library(tidyquant)
+library(timetk)
+library(dygraphs)
+library(tibbletime)
+library(anomalize)
+library(RJSONIO)
+library(ROCR)
+library(fOptions)
+library(fExoticOptions)
+library(corrplot)
+library(corrr)
+```
+
+## Connecting to Datasources 
+
+R provides significant number of interfaces to public and commercial data and pricing platforms in the energy world. 
+
+### Trading platforms 
+
+* *Reuters EIKON* - package located in https://github.com/ahmedmohamedali/eikonapir provides an R interface to Reuters EIKON Terminal all the documentation can be found in github page
+* *Bloomberg* - package is Rblpapi located in: https://github.com/Rblp/Rblpapi or install from cran
+* *Morningstar* - package can be directly requested from vendor but following documentation exist to connect to Morningstar datafeeds: http://www.morningstarcommodity.com/get-support/r_package_1.2-1_userguide.pdf there is no publicly released R package for new Market Place data server but good people at Morningstar can help you get connected.  
+
+### Web API Access:
+
+There are lots of public API's that provide energy specific data. The largest of such organization is Energy Information Administration (www.eia.gov). All the data is public available through their OpenData platform. Anyone can acquire a free token and access all of their public data sets. 
+
+*Example below shows how this is done using RJSON package to connect to their Weekly natural gas storage data:* There are times one needs advance interaction with API servers in those cases *httr* package can provide a more advance capability.   
+
+
+```{r}
+eia_df_gasstorage <-
+tribble(
+  ~ticker, ~location,
+  "NG.NW2_EPG0_SWO_R48_BCF.W", "US",
+  "NG.NW2_EPG0_SWO_R31_BCF.W", "East",
+  "NG.NW2_EPG0_SWO_R32_BCF.W", "Midwest",
+  "NG.NW2_EPG0_SWO_R35_BCF.W", "Pacific",
+  "NG.NW2_EPG0_SWO_R33_BCF.W", "South"
+  )  # create a data frame with all the tickers
+```
+
+```{r}
+
+get_eia_plant <- function(inp) {
+
+  extract <- 
+    RJSONIO::fromJSON(paste0(
+      "http://api.eia.gov/series/?api_key=B0EDABE19140380774029141270387BE&series_id=", 
+      inp, 
+      "&format=json")) # RJSON Call 
+
+  series<-
+    extract$series[[1]]$data %>% 
+    do.call(rbind,args = .) # convert list to the series 
+
+  data <- 
+    tibble::data_frame(date=unlist(series[,1]), value=unlist(series[,2])) %>% 
+   dplyr::mutate(date=lubridate::ymd(date),value=value)  # create data frame of time/values 
+return(data)
+}
+
+eia_df_gasstorage %<>% dplyr::mutate(data=purrr::map(ticker,get_eia_plant)) %>% unnest() # use the purrr package to apply the function to the dataframe and 
+```
+
+
+```{r}
+# create data pull function to access EIA API pull data and clean and convert data to the correct formation
+jkr_fun_1 <- function(code) {
+
+  fromJSON(paste0(
+    "http://api.eia.gov/series/?api_key=B0EDABE19140380774029141270387BE&series_id=",
+    code,
+    "&format=json")) %>%  
+  pluck("series", 1, "data") %>% 
+    tibble(
+      date = ymd(map_chr(., 1)),
+      value = map_chr(., 2)
+    ) %>% 
+  select(-`.`) %>% 
+  mutate(value = as.numeric(value))
+}
+```
+
+```{r}
+jkr_fun_2 <- function(code) {
+  fromJSON(paste0(
+    "http://api.eia.gov/series/?api_key=B0EDABE19140380774029141270387BE&series_id=",
+    code,
+    "&format=json")) %>%  
+  pluck("series", 1, "data") %>%
+  transpose() %>% 
+  `names<-`(c("date", "value")) %>% 
+  simplify_all() %>% 
+  as_tibble() %>% 
+  mutate(date = ymd(date)) %>% 
+  arrange(date)
+}
+
+```
+
+
+
+```{r}
+eia_df_gasstorage %>%  
+  mutate(data = map(ticker, jkr_fun_2)) %>% 
+  unnest()
+```
+
+```{r}
+eia_tibble <- 
+  eia_df_gasstorage %>%  
+  mutate(data = map(ticker, jkr_fun_2))  %>% 
+  unnest()
+```
+
+
+Use EIA API to get natural gas prices
+
+NG.NW2_EPG0_SWO_R48_BCF.W = ticker for Weekly Lower 48 States Natural Gas Working Underground Storage
+
+```{r}
+
+
+#lower_48_ng_storage <- 
+RJSONIO::fromJSON(paste0(
+      "http://api.eia.gov/series/?api_key=B0EDABE19140380774029141270387BE&series_id=",
+      "NG.NW2_EPG0_SWO_R48_BCF.W",
+      "&format=json"),
+  simplifyDataFrame = FALSE, simplifyMatrix = FALSE
+      ) %>% 
+  #lower_48_ng_wrangled <- 
+  #lower_48_ng_storage %>% 
+  pluck("series", 1, "data") %>%
+  transpose() %>% 
+  `names<-`(c("date", "value")) %>% 
+  simplify_all() %>% 
+  as_tibble() %>% 
+  mutate(date = ymd(date)) %>% 
+  arrange(date)
+
+```
+
+
+## Understanding price and fundemental data
+
+Data can be plotted using ggplot package as a means to perform exploratory visualization
+
+```{r plot, echo=FALSE}
+lower_48_ng_wrangled %>% 
+  mutate(weather = if_else(lubridate::month(date) %in% 4:10, "warm", "cold")) %>% 
+  ggplot(aes(x = date, y = value, color = weather)) + 
+  geom_point()
+```
+
+Applying more advanced techniques to understand trends and flag any outliers in the time series packages such as twitter anomaly detection  https://github.com/twitter/AnomalyDetection or anomalize package (cran) from www.business-science.io/ can be very useful giving a overview of the dataset
+
+```{r}
+lower_48_ng_wrangled %>% 
+  arrange(date) %>% 
+  time_decompose(value) %>%
+  anomalize(remainder, alpha = 0.1, method = "iqr") %>%
+  time_recompose() %>%
+  plot_anomalies(time_recomposed = TRUE, 
+                 ncol = 3, 
+                 alpha_dots = 0.5)
+```
+
+EIA natural gas storage data can be broken into seasonal components to identify seasonal/trend and error terms. This is very useful for fundamental season data such as supply/demand and storage injection and withdrawal using the outlier detection we can further investigate drivers impacting fundamental supply/demand 
+
+
+```{r}
+lower_48_ng_wrangled %>% 
+  arrange(date) %>% 
+  time_decompose(value, 
+                 method = "stl",
+                 frequency = "12 months", 
+                 trend = "auto") %>%
+    anomalize(remainder, 
+              method = "gesd", 
+              alpha = 0.5, 
+              max_anoms = 1) %>%
+    # Plot Anomaly Decomposition
+    plot_anomaly_decomposition() +
+    ggtitle("L48 Nat Gas Storage: Anomaly Decomposition")
+```
+
+### Pricing data and timeseries data
+
+Pricing data can be sourced from many places Bloomberg/Reuters EIKON or price repositories from Morningstar. Financial settles in many markes are also published by ICE and CME. 
+
+The following dataset is generously provided to us by Intercontinental Exchange for the purpose of this workshop and big thank you to ICE for allowing us to use this data. 
+
+
+```{r}
+ng_price <- 
+  read_csv("https://raw.githubusercontent.com/bigdatalib/er2018/master/ng_price.csv?token=AHhefcXcOFRsQKNGGKH5dBZNDjQ1z-pDks5a-P7YwA%3D%3D")
+```
+The ability to apply rolling functions on financial data is key. *tibbletime* package provides an easy solution to apply rolling functions to any data.frame.
+
+```{r}
+
+rolling_sd <- 
+  rollify(sd, window = 30) # rolling strandard deviation 
+  
+rolling_cor <- 
+    rollify(.f = function(long_ret, short_ret){
+      cor(long_ret,short_ret)
+      }, 
+      window = 100) # rolling correlation 
+  
+rolling_reg <- 
+  rollify(.f = function(long_ret, short_ret){
+    lm(long_ret ~ short_ret)
+    }, 
+    window = 60, unlist=FALSE) # rolling regression
+```
+
+
+
+```{r}
+henry_hub_data <-
+  ng_price %>%
+  dplyr::filter(symbol == "H") %>%  # filter henry hub price data
+  select(date, contract, price) %>%  # only use the columns that are needed 
+  group_by(contract) %>% # group by prompt contract apply function for each group
+  arrange(date) %>%  # arrange dates is increasing order
+  mutate(diff = log(price - lag(price))) %>% 
+  na.omit() %>% 
+  mutate(sd = rolling_sd(diff))  # apply SD function for 30 day rolling SD
+```
+
+Quickly plot the data using dygraph 
+
+```{r}
+henry_hub_data %>% 
+  ungroup() %>% 
+  dplyr::filter(contract == "1") %>% 
+  select(-contract) %>% 
+  timetk::tk_xts(date_var = date) %>% 
+  dygraph()
+```
+
+
+### Statistical Inference 
+
+Visualizing statistical relationship between markets and clustering markets and data
+
+```{r}
+gas_basis_prices<-
+  ng_price %>% 
+  dplyr::filter(contract == 1) %>% 
+  dplyr::select(date, curve, price) %>%
+  dplyr::group_by(curve) %>% 
+  dplyr::mutate(sprd_price = price - lag(price)) %>% 
+  dplyr::select(-price) %>% 
+  tidyr::spread(curve, sprd_price)
+
+M <- cor(na.omit(gas_basis_prices[,-1]))
+
+corrplot(M, method = "circle", order = "FPC")
+
+```
+
+In energy market trading and risk management understanding the price relationship of product/location/grade pairs is key in entering a trading strategy and managing risk. Rolling regression is a quick way of quantifying a risk of pair trade and size the trade accordingly.  
+
+```{r}
+rolling_sd <- 
+  rollify(.f = ~sd(.x), window = 30)
+rolling_cor <- 
+  rollify(.f = function(long_ret,short_ret){
+    cor(long_ret,short_ret)
+    }, window = 100)
+rolling_reg<- 
+  rollify(.f = function(long_ret,short_ret){
+    lm(long_ret~short_ret)
+    }, window = 60,unlist=FALSE)
+
+gas_basis_prices %>% dplyr::select(date, Pan, Rocks) %>% 
+  dplyr::mutate(correl_values = rolling_cor(Pan, Rocks)) %>% 
+  ggplot(aes(x = date, y = correl_values)) + geom_line() 
+
+gas_basis_prices %>% dplyr::select(date, Pan, Rocks) %>% 
+  dplyr::mutate(correl_values = rolling_cor(Pan, Rocks)) %>% 
+  dplyr::mutate(sw = ifelse(lubridate::month(date) %in% 4:11,"S","W")) %>%
+    ggplot(aes(x = date, y = correl_values, color = sw)) + geom_point()
+
+values <- 
+  gas_basis_prices %>% 
+  dplyr::select(date, Pan, Rocks) %>% 
+  dplyr::mutate(correl_values=rolling_cor(Pan,Rocks)) %>% 
+  dplyr::mutate(Pan_vols=rolling_sd(Pan)) %>% 
+  dplyr::mutate(Rocks_vols=rolling_sd(Rocks)) %>%
+  dplyr::mutate(beta=rolling_reg(Pan,Rocks)) %>% na.omit() %>%
+  dplyr::mutate(stat=map(beta,broom::tidy)) %>% 
+  unnest(stat) %>% dplyr::filter(term=="short_ret")
+
+gas_basis_prices %>% 
+  dplyr::select(date,Pan,Rocks) %>% 
+  dplyr::mutate(correl_values=rolling_cor(Pan,Rocks)) %>% 
+  dplyr::mutate(Michcon_vols=rolling_sd(Pan)) %>% 
+  dplyr::mutate(Chicago_vols=rolling_sd(Rocks)) %>%
+  dplyr::mutate(beta=rolling_reg(Pan,Rocks)) %>% na.omit() %>%
+  dplyr::mutate(stat=map(beta,broom::tidy)) %>% 
+  unnest(stat) %>% 
+  dplyr::filter(term=="short_ret") %>% 
+  dplyr::select(date,estimate) %>% 
+  timetk::tk_xts(date_var=date) %>% 
+  dygraph()
+```
+
+
+
+### Hypothsis Testing and Modelling
+
+Are the gas storage numbers and Henry hub prices related? i.e. for a storage build we get bearish move and bullish move in the case of draw. 
+
+```{r}
+fundi_data<- 
+  lower_48_ng_wrangled %>%   
+  select(date, value) %>% 
+  mutate(diff = value-lag(value)) %>% 
+  select(-value) # clean data to a correct format
+
+price_data <-
+  henry_hub_data %>% 
+  #dplyr::filter(contract == 1)  %>% 
+  ungroup() %>%
+  select(date, diff) %>% 
+  rename(price_diff = diff) # clean price data 
+
+all_data <- 
+  dplyr::left_join(price_data, fundi_data, by="date") %>% 
+  na.omit()  # combine the two datasets
+
+
+all_data %>% 
+  ggplot(aes(x = diff, y = price_diff)) +
+  geom_point() + 
+  geom_smooth(method = "loess", se = FALSE) # try lm too
+```
+
+```{r}
+all_data<- 
+  all_data %>% 
+  dplyr::mutate(Price_UD = if_else(price_diff > 0, 1, 0), 
+                Storage_UD=if_else(diff > 0, 1, 0)) # label and map bearish and bullish moves and build and draws in this case bullish and build == 1 and bearish and draw is 0 
+model <- glm(formula = Price_UD ~ Storage_UD, 
+             family = binomial(link='logit'),
+             data = all_data[1:140, 4:5]) # use a calsification model such as logistics regression from glm function to build a model on a training set
+anova(model, test = "Chisq") # ANOVA to assess the significance of the predictor - makes more sense when dealing with mulivariant models we can identify what is truly important predictor
+summary(model) # Model summary provides general statists
+
+```
+Using helper packages we can assess the and evaluate the hypothesis that is better understandable ROCR is a great package that helps us to generate AUC curves. This helps us understand the goodness of the model
+
+```{r}
+library(ROCR)
+p <- predict(model, 
+             newdata = all_data[141:153, 4:5], 
+             type='response')
+
+pr <- prediction(p, all_data[141:153,4])
+
+prf <- performance(pr, measure = "tpr", x.measure = "fpr")
+
+plot(prf)
+
+auc <- performance(pr, measure = "auc")
+auc <- auc@y.values[[1]]
+auc
+
+```
+
+## Option Modelling and Quant Libraries
+
+R provides a great interface to all the major Quant Libraries there are two ways to approach quant libraries for all the internal libraries R provides interface and integration to C++
+
+### Internal Libraries 
+
+(1) RCPP package is a core package that allows for this interface : http://www.rcpp.org/
+(2) rJava package is a low level interface to all the libraries Java wrappers can be build for any 3rd party applications and DLLs which then can be interfaced from R. See http://www.rforge.net/rJava/
+
+### Publically Available Quant Libs
+
+(1) fOptions and fExhoticOptions these are option libraries based on the book "Complete Guide Option Pricing Formulas" https://www.amazon.com/Complete-Guide-Option-Pricing-Formulas/dp/0071389970
+(2) RQuantLib is the R interface to Quantlib open source option models: http://dirk.eddelbuettel.com/code/rquantlib.html
+
+
+### Spread Option Modelling 
+
+Quick example of options and how they can be applied to our pricing data-set
+
+```{r}
+price_raw<-readr::read_csv("ng_price.csv") %>% 
+dplyr::filter(contract==12) %>% 
+dplyr::select(date,curve,price) %>%
+ungroup() %>% dplyr::filter(curve %in% c("Pan","Rocks","Henry")) %>% 
+  tidyr::spread(curve,price) %>%
+  dplyr::mutate(Pan=Pan+Henry,Rocks=Rocks+Henry) %>%
+  tidyr::gather(key = curve,value=price,-date) %>%
+  dplyr::filter(!curve=="Henry") %>% 
+  dplyr::group_by(curve) %>%
+dplyr::mutate(ret=(price-lag(price))/price) # Creating fixed price Panhandle and Rockied NG basis prices
+
+
+vols<-price_raw %>% dplyr::select(-price) %>% tidyr::spread(curve,ret) %>% 
+  dplyr::mutate(vol_pan=rolling_sd(Pan)*sqrt(252),vol_rocks=rolling_sd(Rocks)*sqrt(252)) %>%
+  dplyr::mutate(cor_value=rolling_cor(Pan,Rocks)) %>% dplyr::select(-Pan,-Rocks) # Calculate Vols 
+
+prices<-price_raw %>% dplyr::select(date,price,curve) %>% tidyr::spread(curve,price) 
+
+
+all<- prices %>% dplyr::left_join(vols,by="date") %>% na.omit() %>% 
+  dplyr::mutate(x=0.3,r=0.05,t=1,type="c") %>% 
+  dplyr::mutate(price=purrr::pmap(list(type,Rocks,Pan,x,t,r,vol_rocks,vol_pan,cor_value),.f=fExoticOptions::SpreadApproxOption)) %>%
+  dplyr::mutate(oprice=purrr::map(price,.f=function(x) x@price)) %>% unnest(oprice) # Apply Option model and calculate Option value
+
+
+```
+
+```{r}
+gas_basis_prices<-readr::read_csv("ng_price.csv") %>% dplyr::filter(contract==1) %>% dplyr::select(date,curve,price) %>%
+ na.omit() %>%
+  dplyr::group_by(curve) %>% ggplot(aes(x=date,y=price))+geom_line()+facet_wrap(~curve) + ylim(-2,2)
+gas_basis_prices
+```
+
+
+
+
