@@ -1,0 +1,216 @@
+---
+title: "Labor Cost Outperformers"
+output:
+  html_notebook: default
+---
+
+```{r setup}
+knitr::opts_chunk$set(message=FALSE, warning=FALSE)
+library(tidyquant)
+library(tidyverse)
+library(timetk)
+library(tibbletime)
+```
+
+A recent piece on Business Insider, available [here](http://www.businessinsider.com/goldman-sachs-rising-wage-inflation-labor-costs-14-best-stocks-2018-1) if you are a BI Prime subscriber and similar piece available from CNBC [here](https://www.cnbc.com/2017/10/09/goldman-found-a-way-to-invest-around-rising-wages-and-it-is-beating-the-market.html), discusses an idea from  Goldman Sachs that rising labor costs (expected in 2018) should lead to outperformance by companies with relatively low labor costs as a percentage of expenses.[^1] In today's post, we will construct an R code flow/template to examine the relationship between stock performance and labor costs, visualize the recent historical relationships that might have led to this hypothesis, and think about extensions at the end. I'm going to be writing weekly posts like this in 2018 where I take an interesting hypothesis or idea and try to reproduce it, or extend it, or explore/visualize it with R code. Suggestions welcome!
+
+[^1]: On the subject of wages in 2018,
+[this piece](https://www.bloomberg.com/news/articles/2018-01-31/employment-costs-in-u-s-match-fastest-12-month-gain-since-2008) from Bloomberg has a bit more on rising labor costs as we head into 2018, and another from CNBC is [here](https://www.cnbc.com/2018/01/09/goldman-sachs-says-us-wages-will-really-start-to-rise-this-year.html). 
+
+There are two main motivations for this overall project: (1) reproducing an idea or its data foundations helps us to firmly understand it and (2) when market research includes reproducible code and data provenance, that research can serve as the foundation for further development by curious data scientists or quants. Note that the motivation is not try to prove true, or refute, or debunk the original research!
+
+With that, some caveats on today's post. 
+
+First, I have read only a summary of this research, not the actual notes published by Goldman. It sounded interesting so I wanted to put together some visualizations and explore. I don't know the complete list of stocks used for the low labor cost index. The articles mentioned a few tickers so we'll roll with those. The 'low labor cost index' might be available on Bloomberg if you have access to that data set. I don't.
+
+Second caveat is that I chose a proxy to measure labor costs, the [BEA series on compensation of employees](https://fred.stlouisfed.org/series/A576RC1), available via FRED. Perhaps there's a better way to measure wage growth and labor costs (in the code flow below it's not cumbersome to substitute in different time series). I'm also not taking inflation into account. 
+
+Let's get to it. 
+
+We will choose a few stocks from the low labor cost bucket and save their tickers as `symbols_low`.  
+I'm going to include the SP500 ETF 'SPY' as well for benchmarking. 
+
+```{r}
+symbols_low <- c( "TAP", "VLO", "AFL", "ESRX", 
+             "ABC", "QCOM", "SWKS", "LRCX",
+             "HST", "HCN", "NFLX", "NKE", "AAPL", "SPY")
+```
+
+Have a look at those tickers and notice both Apple and Netflix are included. 
+
+Next, we need to choose a start date since we are looking backwards here. Let's go with 2010 for a starting year.
+
+```{r}
+start_date <- "2010-01-01"
+```
+
+Now we want to import prices for those tickers, convert them to returns, and then calculate how a dollar would have grown if invested in each stock. We will use the `tq_get()` function from the `tidyquant` package to import prices, then call `select(date, symbol, adjusted)` to keep just the date, symbol and adjusted prices columns. 
+
+To transform to log monthly returns, we will first use the `tibbletime` package to convert to monthly prices with `as_tbl_time(index = date) %>% as_period(period = "monthly", side = "end")`. Then we calculate log returns and store them in a column called `monthly.returns`, by invoking `mutate(monthly.returns = log(adjusted) - log(lag(adjusted)))`.  
+
+Finally, we can calculate the growth of a dollar in each equity and save the result in a column called `growth` with `mutate(growth = cumprod(1 + monthly.returns))`.
+
+
+```{r}
+returns_low <- symbols_low %>%
+  tq_get(get = "stock.prices", from = start_date, collapse = "monthly") %>% 
+  select(date, symbol, adjusted) %>% 
+  group_by(symbol) %>% 
+  as_tbl_time(index = date) %>% 
+  as_period(period = "monthly", side = "end") %>%
+  mutate(monthly.returns = log(adjusted) - log(lag(adjusted))) %>% 
+  replace_na(list(monthly.returns = 0)) %>% 
+  mutate(growth = cumprod(1 + monthly.returns)) %>% 
+  as_tibble()
+
+head(returns_low)
+```
+
+Have a quick peak and note that we have a tidy, long formatted data frame that holds adjusted prices, monthly returns and dollar growth for each of our stocks. 
+
+Now we repeat the same process for a bucket of high labor cost stocks, again I gleaned these names from the Business Insider article. 
+
+```{r}
+symbols_high <- c("DRI", "FISV", "ADP",  "SRCL")
+
+returns_high <-
+  symbols_high %>% 
+  tq_get(get = "stock.prices", from = start_date, collapse = "monthly") %>% 
+  group_by(symbol) %>%
+  select(date, symbol, adjusted) %>%
+  as_tbl_time(index = date) %>% 
+  as_period(period = "monthly", side = "end") %>%
+  mutate(monthly.returns = log(adjusted) - log(lag(adjusted))) %>% 
+  replace_na(list(monthly.returns = 0)) %>% 
+  mutate(growth = cumprod(1 + monthly.returns))  %>% 
+  as_tibble()
+
+head(returns_high)
+
+```
+The data frame of high labor cost equities should look the same as the previous data frame. 
+
+Now we want some data on those labor costs and how they have changed over time. We will import FRED data from Quandl and ask for it in monthly increments by adding `collapse = "monthly"`. Note that we are using `tq_get()` again, but accessing a different data source.
+
+I also want to see the monthly change in labor costs, so will add a `monthly_increase` column with `mutate(monthly_increase = (value - lag(value))/lag(value))`.
+
+We're not done yet though. Let's include three more transformations on wage increase: the 3-month lagged increase, the 6-month lagged increase and the cumulative wage increase if wages had started at $1. I think of the cumulative increase as a kind of wage index, and so label the column `wage_index` and create it with `mutate(wage_index = cumprod(1 + monthly_increase))`.  The 3-month lagged monthly increase is created with `mutate(wage_lag_3 = lag(monthly_increase, 3))` and I include in case we want to examine how the 3 month lagged increase in wages effects current monthly returns for an equity. That lag might not be enough - perhaps returns need more like 6 months to take account of wage increases so we will add that column as well.
+
+```{r}
+# Change to your key here
+quandl_api_key("d9EidiiDWoFESfdk5nPy")
+
+wage_growth <- "FRED/A576RC1" %>%
+    tq_get(get      = "quandl",
+           collapse = "monthly",
+           from = start_date) %>%
+  mutate(monthly_increase = (value - lag(value))/lag(value)) %>% 
+  replace_na(list(monthly_increase = 0)) %>% 
+  mutate(wage_index = cumprod(1 + monthly_increase)) %>% 
+  mutate(wage_lag_3 = lag(monthly_increase, 3)) %>% 
+  mutate(wage_lag_6 = lag(monthly_increase, 6))
+  
+
+head(wage_growth)
+```
+
+Now we can create two objects: one to hold the equity prices, returns and dollar growth of the low labor cost bucket and the wage data, and a second to hold the equity prices, returns and dollar growth of the high labor cost bucket and the wage data.
+
+```{r}
+
+returns_wages_low <- 
+  returns_low %>% 
+  filter(date <= "2018-01-01") %>% 
+  mutate(wage_change = wage_growth$monthly_increase,
+         wage_index = wage_growth$wage_index, 
+         wage_lag_3 = wage_growth$wage_lag_3,
+         wage_lag_6 = wage_growth$wage_lag_6) %>% 
+  as_tibble()
+
+returns_wages_high <- 
+  returns_high %>% 
+  filter(date <= "2018-01-01") %>% 
+  mutate(wage_change = wage_growth$monthly_increase,
+         wage_index = wage_growth$wage_index, 
+         wage_lag_3 = wage_growth$wage_lag_3,
+         wage_lag_6 = wage_growth$wage_lag_6)  %>% 
+  as_tibble()
+
+head(returns_wages_low %>% select(date, symbol, monthly.returns, growth, wage_lag_6, wage_index))
+head(returns_wages_high %>% select(date, symbol, monthly.returns, growth, wage_lag_6, wage_index))
+
+```
+
+We have some data on equities and wage growth, now let's visualize and see if we notice anything interesting. Remember, the goal is to have a template we can use going forward, as wage growth potentially accelerates through 2018.
+
+### Charts of low labor cost companies and wage growth
+
+Let's start with a scatter plot of monthly stock returns for the low cost bucket against the 6-month lagged wage growth. We'll also include a regression line by adding `geom_smooth(method = "lm", se = FALSE, size = .5)`.
+
+```{r}
+returns_wages_low %>% 
+  ggplot(aes( x = wage_lag_6, y = monthly.returns, color = symbol)) + 
+  geom_point(size = .5) +
+  geom_smooth(method = "lm", se = FALSE, size = .5) +
+  facet_wrap(~symbol) +
+  theme_minimal()
+
+```
+
+Taking a quick glance, Netflix seems to show the most positive correlation. 
+
+
+Let's look at growth of a dollar in each equity charted alongside the wage growth index. We will make wage growth index a blue dot dash line by calling `geom_line(aes( y = wage_index), color = "cornflowerblue", linetype = "dotdash") `.
+
+```{r}
+returns_wages_low %>% 
+  ggplot(aes(x = date)) + 
+  geom_line(aes(y = growth, color = symbol)) +
+  geom_line(aes( y = wage_index), color = "cornflowerblue", linetype = "dotdash") +
+  facet_wrap(~symbol, scales = "free") +
+  theme_minimal()
+
+```
+
+
+Apple, Netflix, Nike, Valero, Skyworks - all have outperformed the SP500 since 2010. Will that outperformacne accelerate as wage growth accelerates (and those rising wages drag down other SP500 constituents)? We can update those charts throughout 2018 and see.
+
+
+### Charts of high labor cost companies and wage growth
+
+Let's run the same visualizations for the high cost companies. 
+
+
+```{r}
+returns_wages_high %>% 
+  ggplot(aes( x = wage_lag_6, y = monthly.returns, color = symbol)) + 
+  geom_point(size = .5) +
+  geom_smooth(method = "lm", se = FALSE, size = .5) +
+  facet_wrap(~symbol) +
+  theme_minimal()
+```
+
+Ah, noticing a slight negative relationship for FISV and SRCL. 
+
+```{r}
+returns_wages_high %>% 
+  ggplot(aes(x = date)) + 
+  geom_line(aes(y = growth, color = symbol)) +
+  geom_line(aes( y = wage_index), color = "cornflowerblue", linetype = "dotdash") +
+  facet_wrap(~symbol, scales = "free") + 
+  theme_minimal()
+
+```
+
+
+We can see that the high cost bucket contains one large underperformer in SRCL, and perhaps if the bucket were bigger (if we knew more of the constituents) it would contain more large underperformers. FISERV has been a very strong performer, but perhaps rising wage costs will slow it down in 2018. 
+
+
+### Extensions
+
+In a follow up post, we'll turn those 14 low labor cost stocks (and can include more if anyone has suggestions for others that fit the low cost criteria) and 4 high labor cost stocks into their own indices. That is very similar to turning them into a portfolio which we covered in a [previous post](http://www.reproduciblefinance.com/code/introduction-to-portfolio-returns/). Then we can revisit the indices throughout the year, along with wage data, and examine the relationship. 
+
+Another extension could explore a way to search fundamental data for those companies with low and high labor costs, which would allow us to dynamically reconstruct and rebalance our buckets over time. So little time so much to do! 
+
+### Oh yeah
+It should go without saying but: nothing in this post is in any way financial or investing advice.

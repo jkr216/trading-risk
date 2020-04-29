@@ -1,0 +1,170 @@
+---
+title: "Z Score"
+output: html_notebook
+---
+
+
+```{r}
+library(tidyquant)
+sp500_stocks <- tq_index(“SP500″)
+
+stocks<-sp500_stocks %>%
+  
+filter(sector==”Energy”) #filter only the energy sector
+sector <- "Financials"
+
+sector_returns <- 
+  tq_index("SP500") %>%
+  filter(sector == sector) %>% 
+  sample_n(10) %>% 
+  tq_get(get = "stock.prices", from = "2015-01-01") %>% 
+  group_by(symbol) %>% 
+  select(date, symbol, adjusted) %>% 
+  mutate(returns = (log(adjusted) - log(lag(adjusted)))) %>%
+  group_by(date) %>% 
+  na.omit() %>% 
+  mutate(average_sector = mean(returns)) %>% 
+  group_by(symbol)
+
+top_symbol<-
+sector_returns %>%
+group_by(symbol) %>%
+summarise(n=n()) %>%
+head(1)
+
+sp500_returns <- 
+  c("^GSPC") %>%
+  tq_get(get = "stock.prices", from = "2015-01-01") %>% 
+  select(date, adjusted) %>% 
+  mutate(returns = (log(adjusted) - log(lag(adjusted)))) %>% 
+  na.omit()
+
+str(sp500_returns)
+
+library(tibbletime)
+cor_roll <- rollify(~cor(.x, .y), window = 5)
+mean_roll_5 <- rollify(mean, window = 5)
+
+sp500_rolling_corr<-
+  sector_returns %>%
+  filter(symbol == as.character(top_symbol[[1,1]])) %>%
+  select(date, average_sector) %>%
+  mutate(sp500_returns = sp500_returns$returns) %>%
+  as_tbl_time(index = date) %>%
+  ungroup() %>% 
+  select(date, sp500_returns, average_sector) %>% 
+  mutate(cor_rol = cor_roll(sp500_returns, average_sector))
+
+
+stocks_rolling_corr <- NULL
+stocks_rolling_corr <- stock_returns_long %>%
+na.omit() %>%
+group_by(symbol) %>%
+# Mutation
+tq_mutate_xy(
+x = daily_return,
+y = average_sector,
+mutate_fun = runCor,
+# runCor args
+n =30,
+use = “pairwise.complete.obs”,
+# tq_mutate args
+col_rename = “rolling_corr”
+)
+```
+
+
+#calculate daily log returns
+stock_pairs <- stock_prices %>%
+tq_transmute(select = adjusted,
+mutate_fun = periodReturn,
+period = “daily”,
+type = “log”,
+col_rename = “returns”) %>%
+group_by(date) %>%
+mutate(average_sector=mean(returns)) %>%
+ungroup() %>%
+spread(key = symbol, value = returns)
+
+#calculate daily log returns
+sp500_returns <- sp500_prices %>%
+tq_transmute(select = adjusted,
+mutate_fun = periodReturn,
+period = “daily”,
+type = “log”,
+col_rename = “returns”)
+
+stock_returns_long <- stock_pairs %>%
+gather(symbol,daily_return,-date,-average_sector)
+
+#add rolling corr vs s&p
+top_symbol<-stock_returns_long %>%
+group_by(symbol) %>%
+summarise(n=n()) %>%
+head(1)
+
+sp500_rolling_corr<-stock_returns_long %>%
+filter(symbol==as.character(top_symbol[[1,1]])) %>%
+select(date,average_sector) %>%
+inner_join(sp500_returns,by=”date”) %>%
+mutate(sp500_return=returns) %>%
+tq_mutate_xy(
+x = sp500_return,
+y = average_sector,
+mutate_fun = runCor,
+
+# runCor args
+n =30,
+use = “pairwise.complete.obs”,
+# tq_mutate args
+col_rename = “rolling_corr”
+)
+
+stocks_rolling_corr<-NULL
+stocks_rolling_corr <- stock_returns_long %>%
+na.omit() %>%
+group_by(symbol) %>%
+# Mutation
+tq_mutate_xy(
+x = daily_return,
+y = average_sector,
+mutate_fun = runCor,
+# runCor args
+n =30,
+use = “pairwise.complete.obs”,
+# tq_mutate args
+col_rename = “rolling_corr”
+)
+
+####GENERIC MODEL FIT
+r_squareds<-stock_returns_long %>%
+nest(-symbol) %>%
+mutate(model=purrr::map(data,~lm(daily_return~average_sector,data=.))) %>%
+unnest(model %>% purrr::map(broom::glance)) %>%
+select(symbol,r.squared)
+
+z_score<-function(data) {
+data<-data %>%
+mutate(z_score=(diff_series-mean(data$diff_series))/sd(data$diff_series)) %>%
+select(date,z_score)
+return(data)
+}
+
+current_z_scores<-stock_returns_long %>%
+mutate(diff_series=daily_return-average_sector) %>%
+nest(-symbol) %>%
+mutate(zscore=purrr::map(data,z_score)) %>%
+unnest(zscore) %>%
+filter(date==max(date)) %>%
+arrange(z_score)
+
+#PLOT RSQ and ZSCORE
+gplot_rsq_z<-inner_join(r_squareds,current_z_scores,by=”symbol”) %>%
+mutate(r_squared=r.squared) %>%
+ggplot(aes(y=r_squared,x=z_score,colour=-r.squared)) +
+geom_point() +
+geom_text(aes(label=symbol),size=4,vjust=-.5) +
+geom_vline(xintercept = -1, size = 1, color = palette_light()[[2]]) +
+geom_vline(xintercept = 1, size = 1, color = palette_light()[[3]]) +
+labs(title=”R Squared and Z Score vs Total Sector”) +
+theme(legend.position=”none”)

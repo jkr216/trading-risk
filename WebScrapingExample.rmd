@@ -1,0 +1,38 @@
+---
+title: 'Web Scraping '
+output:
+  html_document: default
+  html_notebook: default
+---
+
+Let's try Web scraping using the rvest package.  This code scrapes data for mutual funds and ETFs from Yahoo Finance.  It may work for other securities, but has not been tested.  I created this mainly to get the fund's assets and expense ratio.
+
+
+```{r}
+library(rvest)
+scrapeQuoteSummary <- function(symbol){
+  url <- paste0("https://finance.yahoo.com/quote/",symbol,"?p=",symbol)
+  webpage <- read_html(url)
+  result <- html_nodes(webpage, "#quote-summary")
+  result <- html_nodes(result, "table") %>% html_table()
+  fundName <- html_nodes(webpage,"h1") %>% html_text()
+  startPos <- regexpr(" - ",fundName)
+  fundName <- substr(fundName,startPos+3,nchar(fundName))
+  out <-  c(symbol,fundName, result[[1]]$X2,result[[2]]$X2)
+  names(out)<-c("Symbol","Fund Name",result[[1]]$X1,result[[2]]$X1)
+  return(out)
+}
+
+FNDB <- scrapeQuoteSummary("FNDB")
+FNDB
+DFALX <-scrapeQuoteSummary("DFALX")
+DFALX
+
+library(tidyquant)
+tq_get_options()
+
+fndb_tq <- tq_get("FB", get = "key.stats")
+
+aapl_key_ratios <- tq_get("FNDB", get = "key.ratios")
+aapl_key_stats <- tq_get("AAPL", get = "key.stats")
+```

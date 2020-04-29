@@ -3,497 +3,192 @@ title: "R Notebook"
 output: html_notebook
 ---
 
-### The project
+This is an [R Markdown](http://rmarkdown.rstudio.com) Notebook. When you execute code within the notebook, the results appear beneath the code. 
 
-We will build and implement a trend trading strategy based on the moving average price of the SP500. This is a simple strategy that we will use to explore R code.
+Try executing this chunk by clicking the *Run* button within the chunk or by placing your cursor inside it and pressing *Cmd+Shift+Enter*. 
 
-A simple moving average is calculated by adding all the data for a number of periods and dividing the total by the number of periods. An exponential moving average assigns greater weight to recent time periods. 
-
-We will be examining a trading strategy that buys when the SP500 50-day SMA is above the 200-day SMA (a 'golden cross') and sells when the 50-day SMA moves below the 200-day SMA (a 'death cross').  
-
-### Load the packages
-
-```{r setup}
-knitr::opts_chunk$set(message = FALSE, warning = FALSE)
+```{r}
+knitr::opts_chunk$set(message=FALSE, warning=FALSE)
 library(tidyverse)
 library(tidyquant)
 library(timetk)
-library(tibbletime)
 library(highcharter)
+library(RcppRoll)
+
+library(readr)
+Global_3_Factors <- read_csv("Global_3_Factors.csv", 
+    skip = 6)
+View(Global_3_Factors)
 ```
 
-### Import data
-We will be working with SP500 and treasury bills data so that when we exit the SP500 we can invest in treasuries and get some yield.
-
-Let's explore two ways to get this date. 
-
-First, it is publicly available. We can use the `tidyquant` package and it's `tq_get()` function to grab the data from yahoo! finance. 
+The code chunk below is a copy/paste from last time to import prices, transform to portfolio returns and calculcate Sortino for our chosen MAR of .8%.
 
 ```{r}
 
+treas <- 
+  getSymbols("^IRX", src = 'yahoo', from = "2015-01-01", 
+             auto.assign = TRUE, warnings = FALSE)%>% 
+  map(~Ad(get(.)))%>% 
+  reduce(merge) %>%
+  `colnames<-`("treas") %>%
+  tk_tbl(preserve_index = TRUE, rename_index = "date") %>%
+  mutate(monthly_treas = (1 + (treas/100)) ^ (1/12) - 1, 
+         daily_treas = (1 + (treas/100)) ^ (1/252) - 1)
+tail(treas)
+
+```
+
+```{r}
 symbols <- c("^GSPC", "^IRX")
-
-
+names <- c("spy", "treas")
 prices <- 
-  tq_get(symbols, 
-         get = "stock.prices",
-         from = "1980-01-01")
+  getSymbols(symbols, src = 'yahoo', from = "1990-01-01", 
+             auto.assign = TRUE, warnings = FALSE) %>% 
+  map(~Ad(get(.)))%>% 
+  reduce(merge) %>%
+  `colnames<-`(names) 
+```  
 
-library(writexl)
-# Write the first data set in a new workbook
-write_xlsx(prices, "prices.xlsx")
-write_csv(prices, "prices.csv", append = FALSE)
-```
-
-
-That works well but in industry it's likely you wouldn't be accessing the yahoo! for your price data. Let's see how to import this data from an Excel file or a csv file. 
-
-```{r}
-prices_excel <-  
- read_excel("prices.xlsx") %>% 
-  mutate(date = ymd(date))
-```
-
-```{r}
-prices_csv <- 
- read_csv("prices.csv")  %>% 
-  mutate(date = ymd(date))
-```
-
-
-### Explore the raw data
-
-Start with the simple line chart. This is the SP500, so we probably won't find much of interest here, but if this were alternative data who knows. 
-
-We will use the `ggplot2` package for this.`ggplot2` is R's most popular data visualization package and we will explore its grammar and layering logic. For now, a line chart.
-
-```{r}
-prices %>% 
-  dplyr::filter(symbol == "^GSPC") %>% 
-  select(date, adjusted) %>% 
-  ggplot(aes(x = date, y = adjusted)) +
-  geom_line(color = "cornflowerblue")
-```
-
-Let's add daily returns and better column names.
-
-```{r}
-prices %>% 
-  select(symbol, date, adjusted) %>% 
-  spread(symbol, adjusted) %>%
-  rename(spy = `^GSPC`, treas = `^IRX`) %>% 
-  mutate(spy_returns = log(spy) - log(lag(spy))) %>% 
-  tail(6)
-```
-
-
-```{r, warning = FALSE}
-prices %>% 
-  select(symbol, date, adjusted) %>% 
-  spread(symbol, adjusted) %>%
-  rename(spy = `^GSPC`, treas = `^IRX`) %>% 
-  mutate(spy_returns = log(spy) - log(lag(spy))) %>% 
-  ggplot(aes(x = date, y = spy_returns)) +
-  geom_point(color = "cornflowerblue") +
-  scale_x_date(breaks = scales::pretty_breaks(n = 30)) +
-  ylab("SP500 daily returns") +
-  theme(axis.text.x = element_text(angle = 90))
-```
-
-It's a blunt instrument but look at late 1987, 2000-2002 and late 2008 to 2009.
-
-Let's look at how these returns are distributed. 
-
-```{r}
-prices %>% 
-  select(symbol, date, adjusted) %>% 
-  spread(symbol, adjusted) %>%
-  rename(spy = `^GSPC`, treas = `^IRX`) %>% 
-  mutate(spy_returns = log(spy) - log(lag(spy))) %>% 
-  ggplot(aes(x = spy_returns)) +
-  geom_histogram(color = "cornflowerblue", binwidth = .003, fill = "pink") +
-  # scale_x_date(breaks = scales::pretty_breaks(n = 30)) +
-  ylab("SP500 daily returns") +
-  theme(axis.text.x = element_text(angle = 90))
-```
-
-Eyeball test indicates a longer, negative tail. 
-
-`ggplot()` works in layers. We can add a density layer. 
-
-```{r}
-prices %>% 
-  select(symbol, date, adjusted) %>% 
-  spread(symbol, adjusted) %>%
-  rename(spy = `^GSPC`, treas = `^IRX`) %>% 
-  mutate(spy_returns = log(spy) - log(lag(spy))) %>% 
-  ggplot(aes(x = spy_returns)) +
-  geom_histogram(color = "cornflowerblue", binwidth = .003, fill = "pink") +
-  stat_density(geom = "line", color = "green") +
-  ylab("SP500 daily returns") +
-  theme(axis.text.x = element_text(angle = 90))
-```
-
-Let's investigate the tail statistics a little bit.
-
-```{r}
-prices %>% 
-  select(symbol, date, adjusted) %>% 
-  spread(symbol, adjusted) %>%
-  rename(spy = `^GSPC`, treas = `^IRX`) %>% 
-  mutate(spy_returns = log(spy) - log(lag(spy))) %>%
-  na.omit() %>% 
-  summarise(skewness = skewness(spy_returns),
-            kurtosis = kurtosis(spy_returns))
-```
-
-Negative skew and excess kurtosis; our returns are not exactly normally distributed. 
-
-We have a feel for our data, let's start to add our logic and transform this data. 
-
-First, we need a way to calculate the rolling 50 and 200-day moving averages. We use `rollify()` to create functions for this.
-
+Questions and notes:
+1) Do we want to lag the signal, i.e., if we observe that on day t SMA 50 has crossed SMA 200, do we buy on day t, or on day t + 1? 
+2) Not including dividends here, or taxes/commissions
+3) Using IRX converted to daily and monthly
+4) 
 
 ```{r}
 
-roll_mean_50 <- 
-  rollify(mean, window = 50)
-
-roll_mean_200 <- 
-  rollify(mean, window = 200)
-```
-
-Now we use `mutate()` to add the moving averages to the data.
-
-```{r}
-
-prices %>% 
-  select(symbol, date, adjusted) %>% 
-  spread(symbol, adjusted) %>%
-  rename(spy = `^GSPC`, treas = `^IRX`) %>% 
-  mutate(sma_200 = roll_mean_200(spy),
-         sma_50 = roll_mean_50(spy)) %>% 
-  na.omit()
-```
-
-Let's visualize our new trends, compared to raw price. 
-
-```{r}
-
-prices %>% 
-  select(symbol, date, adjusted) %>% 
-  spread(symbol, adjusted) %>%
-  rename(spy = `^GSPC`, treas = `^IRX`) %>% 
-  mutate(sma_200 = roll_mean_200(spy),
-         sma_50 = roll_mean_50(spy)) %>% 
-  na.omit() %>% 
-  select(-treas) %>% # -spy to see just the trends
-  dplyr::filter(date > "2015-01-01") %>% # try different date bands, post 2017, 2018
-  gather(series, value, -date)  %>% 
-  ggplot(aes(x = date, y = value, color = series)) +
-  geom_line()
-```
-
-Let's get algorithmic.
-
-*If* the 50-day MA is above the 200-day MA, buy the market, *else* go to the risk free return, or can put to zero if we prefer.
-
-What we need: 
-1) rolling 50-day SMA
-2) rolling 200-day SMA
-3) if_else logic to create a buy or sell signal
-
-```{r}
-prices %>% 
-  select(symbol, date, adjusted) %>% 
-  spread(symbol, adjusted) %>%
-  rename(spy = `^GSPC`, treas = `^IRX`) %>% 
-  mutate(sma_200 = roll_mean_200(spy),
-         sma_50 = roll_mean_50(spy)) %>% 
-  na.omit() %>% 
-  mutate(signal = if_else(sma_50 > sma_200, 1, 0),  
-         spy_returns = round(log(spy) - log(lag(spy)), 4))  %>% 
-  dplyr::filter(date > "1987-10-01" & date < "1988-01-01")
-```
-
-
-Let's add the logic: if the signal is 1, buy the SP500, which we will code as signal * SP500 returns (the next day), else go to risk free.
-
-```{r}
-
-prices %>% 
-  select(symbol, date, adjusted) %>% 
-  spread(symbol, adjusted) %>%
-  rename(spy = `^GSPC`, treas = `^IRX`) %>% 
-  mutate(sma_200 = roll_mean_200(spy),
-         sma_50 = roll_mean_50(spy),
-         signal = if_else(sma_50 > sma_200, 1, 0),
-         spy_returns = log(spy) - log(lag(spy)), 
-         daily_treas = (1 + (treas/100)) ^ (1/252) - 1,
-         trend_returns = if_else(lag(signal) == 1, (signal * spy_returns), daily_treas))
-```
-
-We now have a column for our strategy. Let's add a buy and hold strategy where we buy the SP500 90% and treasury rate 10% and hold it for the duration. 
-
-```{r}
-
-prices %>% 
-  select(symbol, date, adjusted) %>% 
-  spread(symbol, adjusted) %>%
-  rename(spy = `^GSPC`, treas = `^IRX`) %>% 
-  mutate(sma_200 = roll_mean_200(spy),
-         sma_50 = roll_mean_50(spy)) %>% 
-  na.omit() %>% 
-  mutate(signal = if_else(sma_50 > sma_200, 1, 0),
+# The prices object will hold our daily price data.
+# Buy when 50 day MA exceeds 200 day MA
+sma_strategy_1990_present <- 
+  prices %>%  
+  tk_tbl(preserve_index = TRUE, rename_index = "date") %>% 
+  mutate(sma_50 = roll_mean(spy, 50, align = "right", fill = NA),
+         sma_200 = roll_mean(spy, 200, align = "right", fill = NA), 
+         signal = ifelse(sma_50 > sma_200, 1, 0),
+         signal_lagged = lag(ifelse(sma_50 > sma_200, 1, 0)),
          spy_returns = log(spy) - log(lag(spy)),
+         monthly_treas = (1 + (treas/100)) ^ (1/12) - 1, 
          daily_treas = (1 + (treas/100)) ^ (1/252) - 1,
-         buy_hold_returns = (.9 * spy_returns) + (.1 * daily_treas),
-         trend_returns = if_else(lag(signal) == 1, (signal * spy_returns), daily_treas)
-         ) %>%
-  na.omit()
-```
-
-We can add columns to see dollar growth for our two asset mixes as well. 
-
-```{r}
-sma_trend_results <- 
-prices %>% 
-  select(symbol, date, adjusted) %>% 
-  spread(symbol, adjusted) %>%
-  rename(spy = `^GSPC`, treas = `^IRX`) %>% 
-  mutate(sma_200 = roll_mean_200(spy),
-         sma_50 = roll_mean_50(spy),
-         signal = if_else(sma_50 > sma_200, 1, 0),
-         spy_returns = log(spy) - log(lag(spy)), 
-         daily_treas = (1 + (treas/100)) ^ (1/252) - 1,
-         buy_hold_returns = (.9 * spy_returns) + (.1 * daily_treas),
-         trend_returns = if_else(lag(signal) == 1, (signal * spy_returns), daily_treas)
-         ) %>%
+         strat_returns = ifelse(signal == 1, (signal * spy_returns), daily_treas)) %>% 
   na.omit() %>% 
   mutate(
-         trend_growth = accumulate(1 + trend_returns, `*`),
-         buy_hold_growth = accumulate(1 + buy_hold_returns, `*`))
+         total_strat_returns = cumprod(1 + strat_returns),
+         growth_strat = accumulate(1 + strat_returns, `*`),
+         total_spy_returns = cumprod(1 + spy_returns),
+         growth_buy_hold = accumulate(1 + spy_returns, `*`))
 
-sma_trend_results %>% tail()
-```
+# Make so all titles centered in the upcoming ggplots
+theme_update(plot.title = element_text(hjust = 0.5))
 
-### Visualize our trend strategy results
-
-```{r}
-sma_trend_results %>%
-  select(date, trend_growth, buy_hold_growth) %>% 
-  gather(strategy, growth, -date) %>% 
-  ggplot(aes(x = date, y = growth, color = strategy)) +
-  geom_line()
-
-```
-
-Our original trend has grown higher, but the z-score logic seems more stable.
-
-### Analyze with standard deviation, skewness, kurtosis, sharpe ratio
-
-
-```{r}
-rfr <- .00003
-
-sma_trend_results %>%
-  select(date, trend_returns, buy_hold_returns) %>% 
-  gather(strategy, returns, -date) %>% 
-  group_by(strategy) %>% 
-  summarise(stddev = sd(returns),
-            mean = mean(returns),
-            skewnsess = skewness(returns),
-            kurtosis = kurtosis(returns),
-            # Sharpe ratio with own equation
-            sharpe = mean(returns - rfr)/
-              sd(returns - rfr))
-```
-
-Our strategy has a higher sharpe, and lower standard deviation than buy hold. 
-We can plot those for a better sense. 
-
-```{r}
-
-sma_trend_results %>%
-  select(date, trend_returns, buy_hold_returns) %>% 
-  gather(strategy, returns, -date) %>% 
-  group_by(strategy) %>% 
-  summarise(stddev = sd(returns),
-            mean = mean(returns),
-            skewnsess = skewness(returns),
-            kurtosis = kurtosis(returns),
-            # Sharpe ratio with own equation
-            sharpe = mean(returns - rfr)/
-              sd(returns - rfr)) %>% 
-  ggplot(aes(x = stddev, y = sharpe, color = strategy)) +
-  geom_point(size = 3)
+sma_strategy_1990_present %>% 
+  ggplot(aes(x = date)) +
+  geom_line(aes(y = total_strat_returns, color = "SMA 50/200")) +
+  geom_line(aes(y = total_spy_returns, color = "Buy-Hold" )) +
+  scale_colour_manual("Strategy",values = c("SMA 50/200" = "blue", "Buy-Hold" = "green")) +
+  ggtitle("BuyHold versus SMA 50/200 since 1990")
 ```
 
 
-JKR Note: more visualizations here to show more ggplot functionality. 
-
-The above is a simple implementation, but is flexible. We can change assets, indicators.
-
-We can also add a signal, for example a zscore for when market is a number of standard deviations above or below a rolling average? 
-How would we implement that? 
-
-1) Calculate a spread
-2) turn it into a z-score
-3) create a signal
-
 ```{r}
-prices %>% 
-  select(symbol, date, adjusted) %>% 
-  spread(symbol, adjusted) %>%
-  rename(spy = `^GSPC`, treas = `^IRX`) %>% 
-  mutate(sma_200 = roll_mean_200(spy),
-         sma_50 = roll_mean_50(spy)) %>% 
-  na.omit() %>% 
-  mutate(trend_signal = if_else(sma_50 > sma_200, 1, 0),
+# Buy when 50 day MA exceeds 200 day MA
+sma_strategy_2000_present <- 
+  prices %>%  
+  tk_tbl(preserve_index = TRUE, rename_index = "date") %>%
+  filter(date > "1999-12-31") %>% 
+  mutate(sma_50 = roll_mean(spy, 50, align = "right", fill = NA),
+         sma_200 = roll_mean(spy, 200, align = "right", fill = NA), 
+         signal = ifelse(sma_50 > sma_200, 1, 0),
          spy_returns = log(spy) - log(lag(spy)),
-         z_spread = (spy - sma_200),
-         z_score = (z_spread - mean(z_spread))/sd(z_spread),
-         z_signal = if_else(
-                            lag(z_score, 1) < -.05 & 
-                            lag(z_score, 2) < -.05 &
-                            lag(z_score, 3) < -.05,
-                            #lag(z_score, 4) < -.05 &
-                            #lag(z_score, 5) < -.05, 
-                            0, 1)) # %>% 
-  # dplyr::filter(date > "1987-10-01")
-  
-```
-
-Now we create a new strategy that depends on both the trend and the z-score.
-
-```{r}
-prices %>% 
-  select(symbol, date, adjusted) %>% 
-  spread(symbol, adjusted) %>%
-  rename(spy = `^GSPC`, treas = `^IRX`) %>% 
-  mutate(sma_200 = roll_mean_200(spy),
-         sma_50 = roll_mean_50(spy),
-         spy_returns = log(spy) - log(lag(spy))) %>% 
-  na.omit() %>% 
-  mutate(trend_signal = if_else(sma_50 > sma_200, 1, 0),
-         z_spread = (spy - sma_200),
-         z_score = (z_spread - mean(z_spread))/sd(z_spread),
-         z_signal = if_else(
-                            lag(z_score, 1) < -.05 & 
-                            lag(z_score, 2) < -.05 &
-                            lag(z_score, 3) < -.05,
-                            #lag(z_score, 4) < -.05 &
-                            #lag(z_score, 5) < -.05, 
-                            0, 1),
+         monthly_treas = (1 + (treas/100)) ^ (1/12) - 1, 
          daily_treas = (1 + (treas/100)) ^ (1/252) - 1,
-         buy_hold_returns = (.9 * spy_returns) + (.1 * daily_treas),
-         trend_z_returns = if_else(lag(trend_signal) == 1 &
-                                 z_signal == 1, 
-                                 (trend_signal * spy_returns), daily_treas),
-         trend_returns =  if_else(lag(trend_signal) == 1,
-                                 (trend_signal * spy_returns), daily_treas)) # %>% 
-  # dplyr::filter(date > "1987-10-01")
+         strat_returns = ifelse(signal == 1, (signal * spy_returns), daily_treas)) %>% 
+  na.omit() %>% 
+  mutate(total_strat_returns = cumprod(1 + strat_returns),
+         total_spy_returns = cumprod(1 + spy_returns)) 
+
+sma_strategy_2000_present %>%
+  ggplot(aes(x = date)) +
+  geom_line(aes(y = total_strat_returns, color = "SMA 50/200")) +
+  geom_line(aes(y = total_spy_returns, color = "Buy-Hold" )) +
+  scale_colour_manual("Strategy",values = c("SMA 50/200" = "blue", "Buy-Hold" = "green")) +
+  ggtitle("BuyHold versus SMA 50/200 since 2000")
 ```
 
-Note the NAs - those will be a problem we convert to dollar growth for visualization.
+
 
 ```{r}
-trend_z_results <- 
-prices %>% 
-  select(symbol, date, adjusted) %>% 
-  spread(symbol, adjusted) %>%
-  rename(spy = `^GSPC`, treas = `^IRX`) %>% 
-  mutate(sma_200 = roll_mean_200(spy),
-         sma_50 = roll_mean_50(spy),
-         spy_returns = log(spy) - log(lag(spy))) %>% 
-  na.omit() %>% 
-  mutate(trend_signal = if_else(sma_50 > sma_200, 1, 0),
-         z_spread = (spy - sma_200),
-         z_score = (z_spread - mean(z_spread))/sd(z_spread),
-         z_signal = if_else(
-                            lag(z_score, 1) < -.05 & 
-                            lag(z_score, 2) < -.05 &
-                            lag(z_score, 3) < -.05,
-                            #lag(z_score, 4) < -.05 &
-                            #lag(z_score, 5) < -.05, 
-                            0, 1),
+# Buy when 50 day MA exceeds 200 day MA
+sma_strategy_2009_present <- 
+  prices %>%  
+  tk_tbl(preserve_index = TRUE, rename_index = "date") %>%
+  filter(date > "2008-12-31") %>% 
+  mutate(sma_50 = roll_mean(spy, 50, align = "right", fill = NA),
+         sma_200 = roll_mean(spy, 200, align = "right", fill = NA), 
+         signal = lag(ifelse(sma_50 > sma_200, 1, 0)),
+         spy_returns = log(spy) - log(lag(spy)),
+         monthly_treas = (1 + (treas/100)) ^ (1/12) - 1, 
          daily_treas = (1 + (treas/100)) ^ (1/252) - 1,
-         trend_z_returns = if_else(lag(trend_signal) == 1 &
-                                 z_signal == 1, 
-                                 (trend_signal * spy_returns), daily_treas),
-         trend_returns =  if_else(lag(trend_signal) == 1,
-                                 (trend_signal * spy_returns), daily_treas),
-         buy_hold_returns = (.9 * spy_returns) + (.1 * daily_treas)) %>% 
-  #dplyr::filter(date > "1987-10-01") %>% 
-  select(date, trend_signal, z_signal, buy_hold_returns, trend_returns, trend_z_returns) %>%
+         strat_returns = ifelse(signal == 1, (signal * spy_returns), daily_treas)) %>% 
   na.omit() %>% 
-  mutate(
-         trend_growth = accumulate(1 + trend_returns, `*`),
-         trend_z_growth = accumulate(1 + trend_z_returns, `*`),
-         buy_hold_growth = accumulate(1 + buy_hold_returns, `*`))
+  mutate(total_strat_returns = cumprod(1 + strat_returns),
+         total_spy_returns = cumprod(1 + spy_returns)) 
 
-trend_z_results %>% tail()
-
+sma_strategy_2009_present %>% 
+  ggplot(aes(x = date)) +
+  geom_line(aes(y = total_strat_returns, color = "SMA 50/200")) +
+  geom_line(aes(y = total_spy_returns, color = "Buy-Hold" )) +
+  scale_colour_manual("Strategy",values = c("SMA 50/200" = "blue", "Buy-Hold" = "green")) +
+  ggtitle("BuyHold versus SMA 50/200 since 2009")
 ```
-
-### Visualize our trend + z strategy results
 
 ```{r}
-trend_z_results %>%
-  select(date, trend_growth, trend_z_growth, buy_hold_growth) %>% 
-  gather(strategy, growth, -date) %>% 
-  ggplot(aes(x = date, y = growth, color = strategy)) +
-  geom_line()
-
-```
-
-Our original trend has grown higher, but the z-score logic seems more stable.
-
-### Analyze with standard deviation, skewness, kurtosis, sharpe ratio
-
-
-```{r}
-rfr <- .00003
-
-trend_z_results %>%
-  select(date, trend_returns, trend_z_returns, buy_hold_returns) %>% 
-  gather(strategy, returns, -date) %>% 
-  group_by(strategy) %>% 
-  summarise(stddev = sd(returns),
-            mean = mean(returns),
-            skewnsess = skewness(returns),
-            kurtosis = kurtosis(returns),
-            # Sharpe ratio with own equation
-            sharpe = mean(returns - rfr)/
-              sd(returns - rfr))
-```
-
-Our strategies have higher sharpe, and lower standard deviation than buy hold. 
-We can plot those for a better sense. 
-
-```{r}
-
-trend_z_results %>%
-  select(date, trend_returns, trend_z_returns, buy_hold_returns) %>% 
-  gather(strategy, returns, -date) %>% 
-  group_by(strategy) %>% 
-  summarise(stddev = sd(returns),
-            mean = mean(returns),
-            skewnsess = skewness(returns),
-            kurtosis = kurtosis(returns),
-            # Sharpe ratio with own equation
-            sharpe = mean(returns - rfr)/
-              sd(returns - rfr)) %>% 
-  ggplot(aes(x = stddev, y = sharpe, color = strategy)) +
-  geom_point(size = 3)
-```
-
-
-### To Shiny so can tweak parameters or RMD for a report
-Port this work to Shiny so end user can choose different assets, different moving averages, different z-score levels.
+# Buy signal month end price > 3-month average price
+avg_monthly_strategy <- 
+  prices %>% 
+  to.monthly(indexAt = "last", OHLC = FALSE) %>% 
+  tk_tbl(preserve_index = TRUE, rename_index = "date")%>% 
+  mutate(six_month_avg = roll_mean(spy, 6, align = "right", fill = NA),
+         signal = ifelse(spy > six_month_avg, 1, 0),
+         spy_returns = log(spy) - log(lag(spy)),
+         monthly_treas = (1 + (treas/100)) ^ (1/12) - 1)#,
+         strat_returns = ifelse(signal == 1, (signal * spy_returns), monthly_treas)) %>% 
+  na.omit() %>% 
+  mutate(total_strat_returns = cumprod(1 + strat_returns),
+         total_spy_returns = cumprod(1 + spy_returns))
 
  
+  mutate(sma_50 = roll_mean(spy, 50, align = "right", fill = NA),
+         sma_200 = roll_mean(spy, 200, align = "right", fill = NA), 
+         signal = lag(ifelse(sma_50 > sma_200, 1, 0)),
+         spy_returns = log(spy) - log(lag(spy)),
+         monthly_treas = (1 + (treas/100)) ^ (1/12) - 1, 
+         daily_treas = (1 + (treas/100)) ^ (1/252) - 1,
+         strat_returns = ifelse(signal == 1, (signal * spy_returns), daily_treas)) %>% 
+  na.omit() %>% 
+  mutate(total_strat_returns = cumprod(1 + strat_returns),
+         total_spy_returns = cumprod(1 + spy_returns))
 
+sma_strategy %>% 
+  ggplot(aes(x = date)) + 
+  geom_line(aes(y = sma_50), color = "blue") +
+  geom_line(aes(y = sma_200), color = "green") + 
+  geom_line(aes(y = SPY), color = "red") 
+# or strat_returns = ifelse(signal = 1, (signal * returns), (daily rfr = .001/365))
+
+
+
+```
+
+To create a strategy of portfolio: 
+1) choose 5 assets
+2) calculate sma or monthly
+3) calculate returns
+4) allocate 20% to each
+5) calculate portfolio returns
+6) calculate signal for each asset
+7) apply the signal to each return
+8) calculate strategy returns by multiplying 20% to each one
+9) one method would be to name each column, then tell a built in function that the column is an asset or list of returns
 
 
 

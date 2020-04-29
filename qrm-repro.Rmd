@@ -1,0 +1,208 @@
+---
+title: "QRM Model"
+output: html_notebook
+---
+
+```{r setup}
+knitr::opts_chunk$set(echo = TRUE, messaage = FALSE, warning = FALSE)
+
+library(tidyverse)
+library(rjson)
+library(tidyquant)
+library(timetk)
+library(dygraphs)
+library(tibbletime)
+library(anomalize)
+library(RJSONIO)
+library(ROCR)
+library(fOptions)
+library(fExoticOptions)
+library(corrplot)
+library(corrr)
+```
+
+
+This is an [R Markdown](http://rmarkdown.rstudio.com) Notebook. When you execute code within the notebook, the results appear beneath the code. 
+
+Try executing this chunk by clicking the *Run* button within the chunk or by placing your cursor inside it and pressing *Cmd+Shift+Enter*. 
+
+
+11 sector factor returns. each asset is mapped to juse one
+
+```{r}
+etf_ticker_sector <- tribble(
+  ~Ticker, ~Sector,
+  "XLB", "Materials",
+  "XLY", "Consumer Discretionary",	
+  "XLF", "Financials",
+  "IYR", "Real Estate",
+  "XLP", "Consumer Defensive",
+  "XLV", "Health Care",	
+  "XLU", "Utilities",
+  "IYX", "Communication Services",
+  "XLE", "Energy",
+  "XLI", "Industrials",  
+  "XLK", "Technology"
+  )
+```
+
+Momentum 
+The momentum metric of an asset is computed by calculating the 11-month cumulative return from 12 months ago to 1 month ago. To avoid look-ahead bias, all the style factors metrics are lagged by one day. The formula is:
+1 + r + 1 + r...for 12 months ago to 1 month ago
+
+
+Size
+log of company's market capitalization one day ago
+
+Value
+It also represents the residual value of assets minus liabilities. By rearranging the original accounting equation, Assets = Liabilities + Stockholders Equity, it can also be expressed as Stockholders Equity = Assets – Liabilities. 
+
+Value is equity/market cap
+
+The style factor exposures of the stocks in the estimation universe on day t
+ are calculated by z-scoring the style factor metrics of the stocks on day t
+. They are standardized (z-scored) with respect to the estimation universe.
+
+JKR: calculate style factor exposure for all stocks in estimation universe, calc mean and sd, then z-score of each individual is distance from mean/sd
+
+```{r}
+symbols <- c("AAPL", "JPM", "BP")
+
+aapl_key_ratios <- tq_get("AAPL", get = "key.ratios")
+
+aapl_key_ratios
+#     filter(type == "IS") %>%
+#     select(annual) %>%
+
+
+aapl_key_ratios %>%  
+  unnest() %>% 
+  dplyr::filter(category == "Earnings Per Share USD"|
+                category == "Dividends USD"|
+                category ==  "Free Cash Flow Per Share * USD" |
+                category ==  "Shares Mil" |
+                category ==  "Revenue" | 
+                category ==  "Total Liabilities" |
+                category ==  "Total Assets" |
+                category == "Total Stockholders' Equity" |
+                category == "Price to Earnings" |
+                category == "Price to Sales" |
+                category == "Price to Book" |
+                category == "Price to Cash Flow" |
+                category == "Dividend Yield") %>% 
+  select(category, date, value)
+```
+
+
+```{r}
+library(readxl)
+symbol <- "AAPL"
+
+fundie_function <- function(symbol){
+  url <- paste("http://www.stockpup.com/data/", symbol, "_quarterly_financial_data.xls", sep = "")
+  
+  destfile <- paste(symbol, "_quarterly_financial_data.xls", sep = "")
+  curl::curl_download(url, destfile)
+
+  read_excel(destfile)  %>% 
+    data.table::transpose() %>% 
+    `colnames<-`(.[1, ]) %>% 
+    slice(-1) %>% 
+    mutate(date = seq(ymd('2018/03/31'), 
+                      by = "-1 quarter", 
+                      length.out = nrow(.)), 
+           ticker = symbol) %>%
+    arrange(date) %>% 
+    select(ticker, date, everything()) %>% 
+    mutate_at(vars(-ticker, -date), as.numeric) %>% 
+    nest(-ticker)
+}
+
+symbols <- c("AAPL", "JPM", "GOOG", "AMZN", "BAC", "WFC", "NFLX")
+
+sp500_fundie_data <- 
+  map_df(symbols, fundie_function) 
+
+sp500_fundie_data %>% 
+  unnest() %>% 
+  group_by(ticker) %>% 
+  mutate(mkt_cap = Shares * Price)
+```
+
+
+```{r}
+
+library(riingo)
+riingo_browse_token()
+riingo_set_token("97d26898fe27141ef524c1fa3ab0d3f0c3c59b09")
+riingo_prices(c("SPY", "EEM", "EFA", "IJS", "AGG")) %>% 
+  select(ticker, date, adjClose)
+
+
+t(AAPL_quarterly_financial_data) 
+tq_index("SP500")
+AAPL_quarterly_financial_data[1, ]
+```
+
+
+```{r}
+
+market_cap <- 
+  aapl_key_ratios %>% 
+  unnest() %>% 
+  dplyr::filter(category == "Shares Mil")
+
+
+library(jsonlite)
+library(tidyverse)
+
+appl_fin <- 
+  fromJSON("https://api.iextrading.com/1.0/stock/aapl/financials", 
+         simplifyDataFrame = FALSE, 
+         simplifyMatrix = FALSE) %>% 
+  pluck("financials") %>% 
+  transpose() %>% 
+  as_tibble()
+
+appl_fin <- 
+  library(jsonlite)
+  library(tidyverse)
+  fromJSON("https://api.iextrading.com/1.0/stock/aapl/financials", 
+         simplifyDataFrame = FALSE, 
+         simplifyMatrix = FALSE) %>% 
+  pluck("financials") %>% 
+  transpose() %>% 
+  as_tibble()
+
+appl_stats <- 
+  fromJSON("https://api.iextrading.com/1.0/stock/aapl/stats", 
+         simplifyDataFrame = FALSE, 
+         simplifyMatrix = FALSE)  %>% 
+  compact() %>% 
+  as_tibble()
+```
+
+```{r}
+t <- appl_api %>% 
+  transpose() %>% 
+  as_tibble()
+
+
+```
+
+
+Short term reversal
+
+```{r}
+# NOT RUN {
+data(ttrc)
+price <- ttrc[,"Close"]
+
+# Default case
+rsi <- RSI(price)
+```
+
+Volatility 
+The volatility of asset
+ is computed by calculating the trailing 6-month return volatility.
+

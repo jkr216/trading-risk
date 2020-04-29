@@ -21,7 +21,8 @@ install.packages("corrplot")
 install.packages("corrr")
 ```
 
-```{r}
+```{r setup}
+knitr::opts_chunk$set(message=FALSE, warning=FALSE)
 library(tidyverse)
 library(rjson)
 library(tidyquant)
@@ -30,11 +31,12 @@ library(dygraphs)
 library(tibbletime)
 library(anomalize)
 library(RJSONIO)
-library(ROCR)
-library(fOptions)
-library(fExoticOptions)
-library(corrplot)
-library(corrr)
+library(glue)
+# library(ROCR)
+# library(fOptions)
+# library(fExoticOptions)
+# library(corrplot)
+# library(corrr)
 ```
 
 ## Connecting to Datasources 
@@ -54,8 +56,56 @@ There are lots of public API's that provide energy specific data. The largest of
 *Example below shows how this is done using RJSON package to connect to their Weekly natural gas storage data:* There are times one needs advance interaction with API servers in those cases *httr* package can provide a more advance capability.   
 
 
+Use EIA API to get natural gas prices
+
+NG.NW2_EPG0_SWO_R48_BCF.W = ticker for Weekly Lower 48 States Natural Gas Working Underground Storage
+
 ```{r}
-eia_df_gasstorage <-
+
+lower_48_ng_storage <- 
+RJSONIO::fromJSON(glue(
+      "http://api.eia.gov/series/?api_key=B0EDABE19140380774029141270387BE&series_id=",
+      "NG.NW2_EPG0_SWO_R48_BCF.W",
+      "&format=json"),
+  simplifyDataFrame = FALSE, 
+  simplifyMatrix = FALSE
+      ) %>% 
+  pluck("series", 1, "data") %>%
+  
+  transpose() %>% 
+  `names<-`(c("date", "value")) %>% 
+  simplify_all() %>% 
+  as_tibble() %>% 
+  mutate(date = ymd(date)) %>% 
+  arrange(date)
+
+```
+
+
+```{r}
+eia_fetcher <- function(series_id) {
+  fromJSON(paste0(
+    "http://api.eia.gov/series/?api_key=B0EDABE19140380774029141270387BE&series_id=",
+    series_id,
+    "&format=json")) %>%  
+  pluck("series", 1, "data") %>%
+  transpose() %>% 
+  `names<-`(c("date", "value")) %>% 
+  simplify_all() %>% 
+  as_tibble() %>% 
+  mutate(date = ymd(date)) %>% 
+  arrange(date)
+}
+
+```
+
+```{r}
+eia_fetcher("NG.NW2_EPG0_SWO_R48_BCF.W")
+```
+
+
+```{r}
+eia_df_series_ids <-
 tribble(
   ~ticker, ~location,
   "NG.NW2_EPG0_SWO_R48_BCF.W", "US",
@@ -63,30 +113,19 @@ tribble(
   "NG.NW2_EPG0_SWO_R32_BCF.W", "Midwest",
   "NG.NW2_EPG0_SWO_R35_BCF.W", "Pacific",
   "NG.NW2_EPG0_SWO_R33_BCF.W", "South"
-  )  # create a data frame with all the tickers
-```
+  )
 
-```{r}
+eia_df_series_ids_tibble <- 
+  tibble(
+    ticker = c("NG.NW2_EPG0_SWO_R48_BCF.W",
+               "NG.NW2_EPG0_SWO_R31_BCF.W",
+               "NG.NW2_EPG0_SWO_R32_BCF.W",
+               "NG.NW2_EPG0_SWO_R35_BCF.W",
+               "NG.NW2_EPG0_SWO_R33_BCF.W"),
+    location = c("US", "East", 
+                 "Midwest", "Pacific", "South")
+  )
 
-get_eia_plant <- function(inp) {
-
-  extract <- 
-    RJSONIO::fromJSON(paste0(
-      "http://api.eia.gov/series/?api_key=B0EDABE19140380774029141270387BE&series_id=", 
-      inp, 
-      "&format=json")) # RJSON Call 
-
-  series<-
-    extract$series[[1]]$data %>% 
-    do.call(rbind,args = .) # convert list to the series 
-
-  data <- 
-    tibble::data_frame(date=unlist(series[,1]), value=unlist(series[,2])) %>% 
-   dplyr::mutate(date=lubridate::ymd(date),value=value)  # create data frame of time/values 
-return(data)
-}
-
-eia_df_gasstorage %<>% dplyr::mutate(data=purrr::map(ticker,get_eia_plant)) %>% unnest() # use the purrr package to apply the function to the dataframe and 
 ```
 
 
@@ -108,63 +147,46 @@ jkr_fun_1 <- function(code) {
 }
 ```
 
-```{r}
-jkr_fun_2 <- function(code) {
-  fromJSON(paste0(
-    "http://api.eia.gov/series/?api_key=B0EDABE19140380774029141270387BE&series_id=",
-    code,
-    "&format=json")) %>%  
-  pluck("series", 1, "data") %>%
-  transpose() %>% 
-  `names<-`(c("date", "value")) %>% 
-  simplify_all() %>% 
-  as_tibble() %>% 
-  mutate(date = ymd(date)) %>% 
-  arrange(date)
-}
-
-```
-
 
 
 ```{r}
-eia_df_gasstorage %>%  
-  mutate(data = map(ticker, jkr_fun_2)) %>% 
+eia_df_series_ids_tibble %>%  
+  mutate(data = map(ticker, eia_fetcher)) %>% 
   unnest()
 ```
+
+
+```{r}
+eia_df_series_ids_tibble %>%  
+  mutate(data = map(ticker, eia_fetcher)) %>% 
+  unnest() %>%
+  group_by(location) %>% 
+  ggplot(aes(x = date, y =  value, color = location)) +
+  geom_line()  +
+  facet_wrap(~location)
+```
+
+```{r}
+eia_plotter <- function(series_id_tibble){
+  series_id_tibble %>%  
+  mutate(data = map(ticker, eia_fetcher)) %>% 
+  unnest() %>%
+  group_by(location) %>% 
+  ggplot(aes(x = date, y =  value, color = location)) +
+  geom_line()
+}
+
+eia_plotter(eia_df_series_ids_tibble)
+```
+
 
 ```{r}
 eia_tibble <- 
-  eia_df_gasstorage %>%  
-  mutate(data = map(ticker, jkr_fun_2))  %>% 
+  eia_df_series_ids_tibble %>%  
+  mutate(data = map(ticker, eia_fetcher))  %>% 
   unnest()
-```
 
-
-Use EIA API to get natural gas prices
-
-NG.NW2_EPG0_SWO_R48_BCF.W = ticker for Weekly Lower 48 States Natural Gas Working Underground Storage
-
-```{r}
-
-
-#lower_48_ng_storage <- 
-RJSONIO::fromJSON(paste0(
-      "http://api.eia.gov/series/?api_key=B0EDABE19140380774029141270387BE&series_id=",
-      "NG.NW2_EPG0_SWO_R48_BCF.W",
-      "&format=json"),
-  simplifyDataFrame = FALSE, simplifyMatrix = FALSE
-      ) %>% 
-  #lower_48_ng_wrangled <- 
-  #lower_48_ng_storage %>% 
-  pluck("series", 1, "data") %>%
-  transpose() %>% 
-  `names<-`(c("date", "value")) %>% 
-  simplify_all() %>% 
-  as_tibble() %>% 
-  mutate(date = ymd(date)) %>% 
-  arrange(date)
-
+eia_tibble
 ```
 
 
@@ -173,20 +195,25 @@ RJSONIO::fromJSON(paste0(
 Data can be plotted using ggplot package as a means to perform exploratory visualization
 
 ```{r plot, echo=FALSE}
-lower_48_ng_wrangled %>% 
+eia_tibble %>% 
   mutate(weather = if_else(lubridate::month(date) %in% 4:10, "warm", "cold")) %>% 
   ggplot(aes(x = date, y = value, color = weather)) + 
-  geom_point()
+  geom_point() +
+  facet_wrap(~location)
 ```
 
 Applying more advanced techniques to understand trends and flag any outliers in the time series packages such as twitter anomaly detection  https://github.com/twitter/AnomalyDetection or anomalize package (cran) from www.business-science.io/ can be very useful giving a overview of the dataset
 
 ```{r}
-lower_48_ng_wrangled %>% 
+
+library(highcharter)
+eia_recomposed <- 
+  eia_tibble %>%
+  group_by(location) %>% 
   arrange(date) %>% 
   time_decompose(value) %>%
   anomalize(remainder, alpha = 0.1, method = "iqr") %>%
-  time_recompose() %>%
+  time_recompose() %>% 
   plot_anomalies(time_recomposed = TRUE, 
                  ncol = 3, 
                  alpha_dots = 0.5)
@@ -196,12 +223,15 @@ EIA natural gas storage data can be broken into seasonal components to identify 
 
 
 ```{r}
-lower_48_ng_wrangled %>% 
+eia_tibble %>%
+  filter(location == "US") %>% 
   arrange(date) %>% 
   time_decompose(value, 
                  method = "stl",
                  frequency = "12 months", 
                  trend = "auto") %>%
+  #tk_xts(date_var = date)
+  #hchart(t)
     anomalize(remainder, 
               method = "gesd", 
               alpha = 0.5, 

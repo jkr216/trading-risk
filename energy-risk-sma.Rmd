@@ -417,26 +417,6 @@ sma_trend_results %>%
 
 Our strategy has a higher sharpe, and lower standard deviation than buy hold. 
 
-We can plot those for a better sense. 
-
-```{r}
-
-sma_trend_results %>%
-  select(date, trend_returns, buy_hold_returns, daily_treas) %>% 
-  gather(strategy, returns, -date, -daily_treas) %>% 
-  group_by(strategy) %>% 
-  summarise(stddev = sd(returns),
-            mean = mean(returns),
-            skewnsess = skewness(returns),
-            kurtosis = kurtosis(returns),
-            # Sharpe ratio with own equation
-            sharpe = mean(returns - daily_treas)/
-              sd(returns - daily_treas)) %>% 
-  ggplot(aes(x = stddev, y = sharpe, color = strategy)) +
-  geom_point(size = 3)
-```
-
-
 Let's take another approach to understanding our strategy returns and how they are dispersed.
 
 We can randomly sample 30 days of returns with the `sample()` funtion and bootstrap some results.
@@ -444,45 +424,42 @@ We can randomly sample 30 days of returns with the `sample()` funtion and bootst
 ```{r}
 sample(sma_trend_results$trend_returns, 
        30,
-       replace = T)
-```
-
-That's a random sample of 30 daily returns from our strategy, with replaceement. 
-
-```{r}
-sma_trend_results %>% 
-  select(trend_returns) %>% 
-   sample_n(30, replace = TRUE) %>% 
-  ggplot(aes(x = trend_returns)) +
-  geom_histogram(binwidth = .001, color = "cornflowerblue", fill = "pink")
-```
-
-
-```{r}
-sample(sma_trend_results$trend_returns, 
-             30, 
-             replace = T)
+       replace = T) 
 ```
 
 
 We can `rerun()` that random sampling 1000 times. 
 
 ```{r}
-samples <- 1000
+samples <- 100
 
 rerun(.n = samples, 
       sample(sma_trend_results$trend_returns, 
              30, 
              replace = T)) %>%  
-  `names<-`(paste("sample", 1:samples, sep = " "))# %>%
-  simplify_all() #%>% 
+  `names<-`(paste("sample", 1:samples, sep = " ")) %>%
+  simplify_all() %>% 
   as_tibble()
 ```
 
 That created a data frame of 1000 random samples of 30 days of returns . What's the mean of each those 1000 random samples?  
 
 ```{r}
+  rerun(.n = samples, 
+      sample(sma_trend_results$trend_returns, 
+             30, 
+             replace = T)) %>%  
+  `names<-`(paste("sample", 1:samples, sep = " ")) %>%
+  simplify_all() %>% 
+  as_tibble() %>% 
+  gather(sample, thirty_dailies) %>% 
+  group_by(sample) %>% 
+  summarise(mean = mean(thirty_dailies))
 
+```
+
+```{r}
+samples <- 1000
 bootstrapped <- 
   rerun(.n = samples, 
       sample(sma_trend_results$trend_returns, 
@@ -493,10 +470,11 @@ bootstrapped <-
   as_tibble() %>% 
   gather(sample, thirty_dailies) %>% 
   group_by(sample) %>% 
-  summarise(mean = mean(thirty_dailies)) %>% 
+  summarise(mean = mean(thirty_dailies)) %>%  
+  ungroup() %>% 
   mutate(se = sd(mean),
-            upper_ci = mean + (2 * se),
-            lower_ci = mean - (2 *se))
+            upper_ci = mean(mean) + (2 * se),
+            lower_ci = mean(mean) - (2 * se))
 
 
 ```
@@ -521,11 +499,22 @@ Let's plot the 95% confidence interval as well.
 bootstrapped %>% 
   ggplot(aes(x = mean)) +
   geom_histogram(binwidth = .0001, fill = "cornflowerblue") + 
-  geom_segment(aes(x = mean(bootstrapped$upper_ci), xend = mean(bootstrapped$upper_ci), y = 0, yend = Inf)) +
-  geom_segment(aes(x = mean(bootstrapped$lower_ci), xend = mean(bootstrapped$lower_ci), y = 0, yend = Inf))
+  geom_segment(aes(x = bootstrapped$upper_ci, 
+                   xend = bootstrapped$upper_ci, 
+                   y = 0, 
+                   yend = Inf)) +
+  geom_segment(aes(x = bootstrapped$lower_ci, 
+                   xend = bootstrapped$lower_ci, 
+                   y = 0, 
+                   yend = Inf))
   
 ```
 
+```{r}
+bootstrapped %>% 
+  select(lower_ci) %>% 
+  first()
+```
 
 
 Let's get more complicated and add secondary logic. 
@@ -591,7 +580,8 @@ prices %>%
   rename(sp500 = `^GSPC`, treas = `^IRX`) %>% 
   mutate(sma_200 = roll_mean_200(sp500),
          sma_50 = roll_mean_50(sp500),
-         sp500_returns = log(sp500) - log(lag(sp500))) %>% 
+         sp500_returns = log(sp500) - log(lag(sp500)),
+         daily_treas = (1 + (treas/100)) ^ (1/252) - 1) %>% 
   na.omit() %>% 
   mutate(trend_signal = if_else(sma_50 > sma_200, 1, 0),
          z_spread = (sp500 - sma_200),
@@ -603,17 +593,15 @@ prices %>%
                             #lag(z_score, 4) < -.05 &
                             #lag(z_score, 5) < -.05, 
                             0, 1),
-         daily_treas = (1 + (treas/100)) ^ (1/252) - 1,
          buy_hold_returns = (.9 * sp500_returns) + (.1 * daily_treas),
          trend_z_returns = if_else(lag(trend_signal) == 1 &
                                  z_signal == 1, 
                                  (trend_signal * sp500_returns), daily_treas),
          trend_returns =  if_else(lag(trend_signal) == 1,
-                                 (trend_signal * sp500_returns), daily_treas)) # %>% 
-  # dplyr::filter(date > "1987-10-01")
+                                 (trend_signal * sp500_returns), daily_treas))
 ```
 
-Note the NAs - those will be a problem we convert to dollar growth for visualization.
+
 
 ```{r}
 trend_z_results <- 
@@ -623,7 +611,8 @@ prices %>%
   rename(sp500 = `^GSPC`, treas = `^IRX`) %>% 
   mutate(sma_200 = roll_mean_200(sp500),
          sma_50 = roll_mean_50(sp500),
-         sp500_returns = log(sp500) - log(lag(sp500))) %>% 
+         sp500_returns = log(sp500) - log(lag(sp500)),
+         daily_treas = (1 + (treas/100)) ^ (1/252) - 1) %>% 
   na.omit() %>% 
   mutate(trend_signal = if_else(sma_50 > sma_200, 1, 0),
          z_spread = (sp500 - sma_200),
@@ -635,7 +624,6 @@ prices %>%
                             #lag(z_score, 4) < -.05 &
                             #lag(z_score, 5) < -.05, 
                             0, 1),
-         daily_treas = (1 + (treas/100)) ^ (1/252) - 1,
          trend_z_returns = if_else(lag(trend_signal) == 1 &
                                  z_signal == 1, 
                                  (trend_signal * sp500_returns), daily_treas),
@@ -643,7 +631,7 @@ prices %>%
                                  (trend_signal * sp500_returns), daily_treas),
          buy_hold_returns = (.9 * sp500_returns) + (.1 * daily_treas)) %>% 
   #dplyr::filter(date > "1987-10-01") %>% 
-  select(date, trend_signal, z_signal, buy_hold_returns, trend_returns, trend_z_returns) %>%
+  select(date, trend_signal, z_signal, buy_hold_returns, trend_returns, trend_z_returns, daily_treas) %>%
   na.omit() %>% 
   mutate(
          trend_growth = accumulate(1 + trend_returns, `*`),
@@ -659,7 +647,7 @@ trend_z_results %>% tail()
 ```{r}
 trend_z_results %>%
   select(date, trend_growth, trend_z_growth, buy_hold_growth, daily_treas) %>% 
-  gather(strategy, growth, -date) %>% 
+  gather(strategy, growth, -date, -daily_treas) %>% 
   ggplot(aes(x = date, y = growth, color = strategy)) +
   geom_line()
 
@@ -671,19 +659,18 @@ Our original trend has grown higher, but the z-score logic seems more less prone
 
 
 ```{r}
-rfr <- .00003
 
 trend_z_results %>%
-  select(date, trend_returns, trend_z_returns, buy_hold_returns) %>% 
-  gather(strategy, returns, -date) %>% 
+  select(date, trend_returns, trend_z_returns, buy_hold_returns, daily_treas) %>% 
+  gather(strategy, returns, -date, -daily_treas) %>% 
   group_by(strategy) %>% 
   summarise(stddev = sd(returns),
             mean = mean(returns),
             skewnsess = skewness(returns),
             kurtosis = kurtosis(returns),
             # Sharpe ratio with own equation
-            sharpe = mean(returns - rfr)/
-              sd(returns - rfr))
+            sharpe = mean(returns - daily_treas)/
+              sd(returns - daily_treas))
 ```
 
 Our strategies have higher sharpe, and lower standard deviation than buy hold. 
@@ -692,25 +679,23 @@ We can plot those for a better sense.
 ```{r}
 
 trend_z_results %>%
-  select(date, trend_returns, trend_z_returns, buy_hold_returns) %>% 
-  gather(strategy, returns, -date) %>% 
+  select(date, trend_returns, trend_z_returns, buy_hold_returns, daily_treas) %>% 
+  gather(strategy, returns, -date, -daily_treas) %>% 
   group_by(strategy) %>% 
   summarise(stddev = sd(returns),
             mean = mean(returns),
             skewnsess = skewness(returns),
             kurtosis = kurtosis(returns),
             # Sharpe ratio with own equation
-            sharpe = mean(returns - rfr)/
-              sd(returns - rfr)) %>% 
+            sharpe = mean(returns - daily_treas)/
+              sd(returns - daily_treas)) %>% 
   ggplot(aes(x = stddev, y = sharpe, color = strategy)) +
   geom_point(size = 3)
 ```
 
 
 ### To Shiny so can tweak parameters or RMD for a report
-Port this work to Shiny so end user can choose different assets, different moving averages, different z-score levels, and different backtest intervals - very important. 
 
-Also include a monte carlo to simulate the future? 
 
  
 
